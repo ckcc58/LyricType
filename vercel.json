@@ -1,8 +1,0 @@
-{
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "src/routes/api/repl-suggest/+server.ts": {
-      "includeFiles": "node_modules/kuromoji/dict/**"
-    }
-  }
-}
