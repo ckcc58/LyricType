@@ -570,7 +570,7 @@
 <style>
   /* --- Overlay control bar --- */
   #overlay-control {
-    margin: -10px -16px 8px;
+    margin: -11px -18px 9px;
     border-radius: 12px 12px 0 0;
     overflow: hidden;
     flex-shrink: 0;
@@ -593,12 +593,12 @@
 
   /* --- Play box (lyrics + input + progress) --- */
   #play-box {
-    width: 50%;
-    min-width: 600px;
+    width: min(55%, calc(100% - 36px));
+    min-width: min(660px, calc(100% - 36px));
     backdrop-filter: brightness(0.3);
     -webkit-backdrop-filter: brightness(0.4) blur(4px);
     border-radius: 12px;
-    padding: 10px 16px;
+    padding: 11px 18px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -612,33 +612,42 @@
   /* --- Status (integrated) --- */
   .status-main {
     display: flex;
-    justify-content: space-around;
+    justify-content: center;
+    gap: 46px;
     padding-bottom: 2px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-    font-size: 0.8rem;
+    font-size: 0.88rem;
   }
   .status-cell {
     display: flex;
     flex-direction: column;
     align-items: center;
+    min-width: 9.35rem;
   }
   .cell-main-row {
     display: flex;
     align-items: baseline;
+    justify-content: center;
     position: relative;
+    width: 100%;
   }
   .cell-label {
     color: #aaa;
-    font-size: 0.65rem;
+    font-size: 0.715rem;
   }
   .cell-value {
+    display: inline-block;
+    min-width: 6.05rem;
+    text-align: center;
     font-weight: bold;
-    font-size: 1.1rem;
+    font-size: 1.21rem;
     color: #ddd;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
   }
   .cell-unit {
-    font-size: 0.65rem;
+    font-size: 0.715rem;
     color: #aaa;
     margin-left: 2px;
     font-weight: normal;
@@ -652,7 +661,7 @@
     align-items: flex-start;
     overflow: hidden;
     pointer-events: none;
-    margin-bottom: 8px;
+    margin-bottom: 9px;
   }
 
   .lyric-line {
@@ -660,9 +669,9 @@
     align-items: baseline;
     color: white;
     white-space: nowrap;
-    font-size: 1.4rem;
+    font-size: 1.54rem;
     margin-bottom: 4px;
-    padding-left: 10px;
+    padding-left: 11px;
     max-width: 100%;
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
   }
@@ -671,7 +680,7 @@
     visibility: hidden;
   }
   .lyric-line {
-    min-height: 2.6rem;
+    min-height: 2.97rem;
   }
   .lyric-line.preview {
     opacity: 0.6;
@@ -706,7 +715,7 @@
 
   #input-area {
     width: 100%;
-    margin-bottom: 6px;
+    margin-bottom: 7px;
   }
 
   .input-wrapper {
@@ -716,14 +725,14 @@
 
   .skip-hint {
     position: absolute;
-    left: 10px;
+    left: 11px;
     top: 50%;
     transform: translateY(-50%);
     pointer-events: none;
     z-index: 1;
     display: flex;
     align-items: center;
-    font-size: 1.4rem;
+    font-size: 1.54rem;
     color: rgba(255, 255, 255, 0.55);
     font-family: monospace;
     user-select: none;
@@ -780,18 +789,18 @@
   .next-line-info {
     display: flex;
     align-items: baseline;
-    gap: 8px;
-    height: 1.6rem;
+    gap: 9px;
+    height: 1.76rem;
     overflow: hidden;
-    padding: 0 10px;
+    padding: 0 11px;
   }
   .next-line-countdown {
-    font-size: 1rem;
+    font-size: 1.1rem;
     color: rgba(255, 255, 255, 0.5);
     font-variant-numeric: tabular-nums;
   }
   .next-line-text {
-    font-size: 1.2rem;
+    font-size: 1.32rem;
     color: rgba(255, 255, 255, 0.4);
     white-space: nowrap;
     overflow: hidden;
@@ -800,15 +809,15 @@
 
   #text-input {
     width: 100%;
-    height: 40px;
-    font-size: 1.4rem;
+    height: 44px;
+    font-size: 1.54rem;
     color: white;
     background-color: rgba(0, 0, 0, 0.3);
     outline: none;
     border: none;
     border-width: 1px 0;
     border-style: solid;
-    padding: 0 10px;
+    padding: 0 11px;
     box-sizing: border-box;
   }
 
@@ -866,7 +875,7 @@
   #progress-wrapper {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
     width: 100%;
   }
 

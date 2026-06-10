@@ -5,7 +5,7 @@ import {
   type TimeTagChar,
   type TimeTagLine,
 } from "$lib/parseLyric/timetag-parser";
-import { findPrevTaggedChar, generateLrcFromTimeTagData } from "$lib/parseLyric/timetag-generator";
+import { generateLrcFromTimeTagData } from "$lib/parseLyric/timetag-generator";
 import type { TtCursor } from "$lib/parseLyric/timetag-operations";
 import { tt } from "../../_state/timetag.svelte";
 
@@ -22,17 +22,20 @@ export function ttIsSpace(ch: TimeTagChar): boolean {
   return /^[\s　]$/.test(ch.char);
 }
 
-/** beforeIdx より前にタグ付き文字があるか */
+/** beforeIdx の直前文字に endTime が入っているか */
 export function ttEndCheckActive(
   lineChars: TimeTagChar[],
   beforeIdx: number,
 ): boolean {
-  return findPrevTaggedChar(lineChars, beforeIdx) !== null;
+  return lineChars[beforeIdx - 1]?.endTime != null;
 }
 
 /** 行末 endTime マーカーをアクティブにすべきか */
 export function ttLineEndActive(lineChars: TimeTagChar[]): boolean {
-  return findPrevTaggedChar(lineChars, lineChars.length) !== null;
+  for (let i = lineChars.length - 1; i >= 0; i--) {
+    if (lineChars[i].isEndCheck) return lineChars[i].endTime != null;
+  }
+  return false;
 }
 
 /** カーソルがエンドチェック位置にあるか判定 */

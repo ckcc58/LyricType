@@ -125,3 +125,53 @@ export function ttUnitProgress(
   if (currentTime >= unit.endTime) return 1;
   return (currentTime - unit.startTime) / (unit.endTime - unit.startTime);
 }
+
+export function ttRubyProgress(
+  line: TimeTagLine,
+  ci: number,
+  currentTime: number,
+): number {
+  const ch = line.chars[ci];
+  if (!ch || ch.reading === ch.char || !ch.reading) return 0;
+
+  const span = Math.max(1, ch.rubySpan ?? 1);
+  const startTime = charStartTime(ch);
+  if (startTime === null) return 0;
+
+  const spanEnd = Math.min(line.chars.length, ci + span);
+  let endTime: number | null = null;
+  for (let i = spanEnd - 1; i >= ci; i--) {
+    if (line.chars[i]?.endTime != null) {
+      endTime = line.chars[i].endTime;
+      break;
+    }
+  }
+
+  if (endTime === null) {
+    for (let i = spanEnd; i < line.chars.length; i++) {
+      const nextStart = charStartTime(line.chars[i]);
+      if (nextStart !== null) {
+        endTime = nextStart;
+        break;
+      }
+    }
+  }
+
+  if (endTime === null || endTime <= startTime) return 0;
+  if (currentTime <= startTime) return 0;
+  if (currentTime >= endTime) return 1;
+  return (currentTime - startTime) / (endTime - startTime);
+}
+
+export function ttRubyUnitProgress(
+  units: KaraokeUnit[],
+  line: TimeTagLine,
+  ci: number,
+  currentTime: number,
+): number {
+  const unit = units.find(
+    (u) => ci >= u.charStart && ci < u.charStart + u.charCount,
+  );
+  if (unit) return ttUnitProgress(units, ci, currentTime);
+  return ttRubyProgress(line, ci, currentTime);
+}

@@ -23,17 +23,6 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	}
 	const data = parsed.data;
 
-	// レート制限: 1日10件
-	const { count } = await locals.supabase
-		.from('charts')
-		.select('id', { count: 'exact', head: true })
-		.eq('uploader_id', locals.profile!.id)
-		.gte('created_at', new Date(Date.now() - 86400000).toISOString());
-
-	if ((count ?? 0) >= 10) {
-		return json({ error: '1日の投稿上限（10件）に達しました' }, { status: 429 });
-	}
-
 	const lyric = parseLyric(data.lrc_raw, data.repl_raw);
 
 	const noteCount = lyric.reduce(
@@ -65,7 +54,6 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			uploader_id: locals.profile!.id,
 			title: data.title,
 			artist: data.artist || null,
-			difficulty: data.difficulty || null,
 			description: data.description || null,
 			lrc_raw: data.lrc_raw,
 			repl_raw: data.repl_raw,

@@ -1,6 +1,23 @@
 import { json } from '@sveltejs/kit';
 import { z } from 'zod';
 import type { RequestHandler } from './$types';
+import { UPSTASH_REDIS_REST_TOKEN, UPSTASH_REDIS_REST_URL } from '$env/static/private';
+import { Ratelimit } from '@upstash/ratelimit';
+import { Redis } from '@upstash/redis';
+
+const redis = new Redis({ url: UPSTASH_REDIS_REST_URL, token: UPSTASH_REDIS_REST_TOKEN });
+
+const handleChangeLimit = new Ratelimit({
+	redis,
+	limiter: Ratelimit.slidingWindow(3, '1 d'),
+	ephemeralCache: new Map()
+});
+
+const nameChangeLimit = new Ratelimit({
+	redis,
+	limiter: Ratelimit.slidingWindow(5, '10 m'),
+	ephemeralCache: new Map()
+});
 
 const handleSchema = z
 	.string()
@@ -34,13 +51,20 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
 			return json({ error: result.error.issues[0].message }, { status: 400 });
 		}
 
-		const { error } = await locals.supabase
-			.from('users')
-			.update({ name: result.data })
-			.eq('id', locals.profile.id);
+		if (result.data !== locals.profile.name) {
+			const { success } = await nameChangeLimit.limit(`profile:name:${locals.profile.id}`);
+			if (!success) {
+				return json({ error: '表示名の変更回数が多すぎます。10分後に再試行してください' }, { status: 429 });
+			}
 
-		if (error) {
-			return json({ error: '表示名の更新に失敗しました' }, { status: 500 });
+			const { error } = await locals.supabase
+				.from('users')
+				.update({ name: result.data })
+				.eq('id', locals.profile.id);
+
+			if (error) {
+				return json({ error: '表示名の更新に失敗しました' }, { status: 500 });
+			}
 		}
 	}
 
@@ -62,6 +86,11 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
 		}
 
 		if (newHandleKey === currentHandleKey) {
+			const { success } = await handleChangeLimit.limit(`profile:handle:${locals.profile.id}`);
+			if (!success) {
+				return json({ error: 'ハンドルの変更回数が多すぎます。1日3回まで変更できます' }, { status: 429 });
+			}
+
 			const { error } = await locals.supabase
 				.from('users')
 				.update({ handle: newHandle, handle_key: newHandleKey })
@@ -98,6 +127,11 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
 
 		if (reservation) {
 			return json({ error: 'このハンドルは現在使用できません（30日間の予約期間中）' }, { status: 400 });
+		}
+
+		const { success } = await handleChangeLimit.limit(`profile:handle:${locals.profile.id}`);
+		if (!success) {
+			return json({ error: 'ハンドルの変更回数が多すぎます。1日3回まで変更できます' }, { status: 429 });
 		}
 
 		// 旧ハンドルを予約テーブルに保存

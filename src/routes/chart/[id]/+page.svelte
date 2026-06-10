@@ -56,6 +56,7 @@
         title: string;
         artist: string | null;
         avg_cpm: number | null;
+        median_cpm: number | null;
         peak_cpm: number | null;
         youtube_video_id: string | null;
     };
@@ -201,6 +202,34 @@
     // ロード済みセッションキー（chart_id + replay_id の組み合わせ）。
     // currentReplay が変わったら再初期化したいので id 単位で判定する。
     let lastInitKey: string | null = null;
+    let youtubeApiPromise: Promise<void> | null = null;
+
+    function ensureYouTubeIframeApi(): Promise<void> {
+        if ((window as any).YT?.Player) return Promise.resolve();
+        if (youtubeApiPromise) return youtubeApiPromise;
+
+        youtubeApiPromise = new Promise((resolve, reject) => {
+            const existing = document.getElementById("yt-api-script") as HTMLScriptElement | null;
+            const previousReady = (window as any).onYouTubeIframeAPIReady;
+            (window as any).onYouTubeIframeAPIReady = () => {
+                previousReady?.();
+                resolve();
+            };
+
+            if (existing) {
+                existing.addEventListener("error", () => reject(new Error("failed to load YouTube iframe API")), { once: true });
+                return;
+            }
+
+            const script = document.createElement("script");
+            script.id = "yt-api-script";
+            script.src = "https://www.youtube.com/iframe_api";
+            script.onerror = () => reject(new Error("failed to load YouTube iframe API"));
+            document.head.appendChild(script);
+        });
+
+        return youtubeApiPromise;
+    }
 
     // chart_data が届いた時 + リプレイ切替時に ChartGame を初期化/再初期化
     $effect(() => {
@@ -271,23 +300,8 @@
         media.set(chart.media);
         imageURL.set(chart.imageURL);
         await tick();
-
-        const existing = document.getElementById("yt-api-script");
-        if (existing && (window as any).YT?.Player) {
-            createGameYTPlayer(videoId, chart);
-        } else if (!existing) {
-            (window as any).onYouTubeIframeAPIReady = () => {
-                createGameYTPlayer(videoId, chart);
-            };
-            const script = document.createElement("script");
-            script.id = "yt-api-script";
-            script.src = "https://www.youtube.com/iframe_api";
-            document.head.appendChild(script);
-        } else {
-            (window as any).onYouTubeIframeAPIReady = () => {
-                createGameYTPlayer(videoId, chart);
-            };
-        }
+        await ensureYouTubeIframeApi();
+        createGameYTPlayer(videoId, chart);
     }
 
     function createGameYTPlayer(videoId: string, chart: ParsedChart) {
@@ -338,15 +352,27 @@
     }
 
     onMount(() => {
+        if (data.chart.youtube_video_id) {
+            void ensureYouTubeIframeApi();
+        }
+
         addKeyHandler();
         document.addEventListener('keydown', handleStartKey);
 
         // inputフォーカス検知
         const onFocusIn = (e: FocusEvent) => {
-            if ((e.target as HTMLElement)?.id === 'text-input') inputFocused = true;
+            if ((e.target as HTMLElement)?.id === 'text-input') {
+                queueMicrotask(() => {
+                    inputFocused = true;
+                });
+            }
         };
         const onFocusOut = (e: FocusEvent) => {
-            if ((e.target as HTMLElement)?.id === 'text-input') inputFocused = false;
+            if ((e.target as HTMLElement)?.id === 'text-input') {
+                queueMicrotask(() => {
+                    inputFocused = false;
+                });
+            }
         };
         document.addEventListener('focusin', onFocusIn);
         document.addEventListener('focusout', onFocusOut);
@@ -540,9 +566,9 @@
                                     <div class="other-chart-artist">{c.artist}</div>
                                 {/if}
                                 <div class="other-chart-meta">
-                                    <span>平均 {c.avg_cpm ?? '--'} CPM</span>
+                                    <span>中央値 {c.median_cpm ?? '--'} CPM</span>
                                     <span class="other-chart-meta-sep">·</span>
-                                    <span>最高 {c.peak_cpm ?? '--'}</span>
+                                    <span>最高 {c.peak_cpm ?? '--'} CPM</span>
                                 </div>
                             </div>
                         </a>

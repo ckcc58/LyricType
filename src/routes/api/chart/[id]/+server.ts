@@ -73,7 +73,6 @@ export const PUT: RequestHandler = async ({ params, request, locals }) => {
 		.update({
 			title: data.title,
 			artist: data.artist || null,
-			difficulty: data.difficulty || null,
 			description: data.description || null,
 			lrc_raw: data.lrc_raw,
 			repl_raw: data.repl_raw,

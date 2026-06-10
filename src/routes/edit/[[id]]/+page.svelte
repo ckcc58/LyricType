@@ -164,6 +164,157 @@
   let waveformTagTimesCache: number[] = []; // times[0]（主チェック）
   let waveformTagTimesSecCache: number[] = []; // times[1+]（副チェック）
   let waveformEndTimesCache: number[] = []; // endTime
+  let editorStateVersion = 0;
+
+  function revokeObjectUrl(url: string | null) {
+    if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
+  }
+
+  function cleanupSourceUrls(
+    sources: { url?: string }[],
+    keepUrl: string | null = null,
+  ) {
+    for (const source of sources) {
+      if (source.url && source.url !== keepUrl) revokeObjectUrl(source.url);
+    }
+  }
+
+  function resetWaveformState() {
+    waveformWorker?.terminate();
+    waveformWorker = null;
+    waveformDuration = 0;
+    waveformGl = null;
+    waveformGlProgram = null;
+    waveformGlVbo = null;
+    waveformGlPhVbo = null;
+    waveformGlTagVbo = null;
+    waveformGlLocs = null;
+    waveformGlVertexCount = 0;
+    waveformSmoothTime = 0;
+    waveformTimeRef = 0;
+    waveformPerfRef = 0;
+    waveformTagTimesCache = [];
+    waveformTagTimesSecCache = [];
+    waveformEndTimesCache = [];
+    player.waveformData = null;
+    player.waveformDecoding = false;
+    player.waveformProgress = 0;
+    player.waveformZoom = 3;
+  }
+
+  function resetEditorState() {
+    editorStateVersion++;
+    lastLoadedChartId = null;
+
+    submit.editingChartId = null;
+    submit.editingUploaderId = null;
+    submit.loadedTitle = "";
+    submit.settingsTab = "submit";
+    submit.showSubmitDialog = false;
+    submit.title = "";
+    submit.artist = "";
+    submit.description = "";
+    submit.ytVideoId = "";
+    submit.source = "";
+    submit.tags = [];
+    submit.tagInput = "";
+    submit.isSubmitting = false;
+    submit.submitError = "";
+    submit.submittedChartId = null;
+    submit.justSubmitted = false;
+    submit.lastSavedSnapshot = null;
+    submit.isAutoFilling = false;
+    submit.autoFillError = "";
+    submit.suggestedTags = [];
+    submit.lastAutoFilledId = "";
+
+    chart.lrcContent = "";
+    chart.lrcYtId = "";
+    chart.lrcFindText = "";
+    chart.lrcReplaceText = "";
+    chart.lrcFindCase = false;
+    chart.lrcFindIdx = 0;
+    chart.chartReplContent = "";
+    chart.appliedChartReplContent = "";
+    chart.isGeneratingRepl = false;
+    chart.isGeneratingReplLite = false;
+    chart.validationMsg = "";
+    chart.replOptimizeInfo = "";
+    chart.showOptDiff = false;
+    chart.lastMergedRepl = "";
+    chart.lastOptimizedRepl = "";
+    chart.ignorePipeSet = new Set<string>();
+    chart.isPipeEditing = false;
+    chart.peFocus = 0;
+    chart.peDecisions = [];
+
+    tt.lines = [];
+    tt.cursorLine = 0;
+    tt.cursorChar = 0;
+    tt.cursorCheck = 0;
+    tt.pendingEndCheckKey = null;
+    tt.pendingEndCheckLine = 0;
+    tt.pendingEndCheckChar = 0;
+    tt.editorMode = "timetag";
+    tt.autoScroll = false;
+    tt.playbackRate = 1.0;
+    tt.showShortcuts = false;
+    tt.showModeMenu = false;
+    tt.undoStack = [];
+    tt.redoStack = [];
+    tt.lrcText = "";
+    tt.displayTime = 0;
+    tt.lastReplKey = "";
+    tt.lastTaggedLine = -1;
+    tt.lastTaggedChar = -1;
+    tt.rubyEditLine = -1;
+    tt.rubyEditChar = -1;
+    tt.rubyEditValue = "";
+    tt.rubyEditKey = "";
+    tt.rubyEditOrigKey = "";
+    tt.toolTimeAdjustValue = 0;
+
+    ui.isProcessing = false;
+    ui.isDragOver = false;
+    ui.lastFolderHandle = null;
+    ui.shiftHeld = false;
+    ui.activeTab = "timetag";
+
+    if (audioRef) {
+      audioRef.pause();
+      audioRef.removeAttribute("src");
+      audioRef.load();
+    }
+    if (player.ytPlayer) {
+      player.ytPlayer.destroy();
+      player.ytPlayer = null;
+    }
+    revokeObjectUrl(player.audioSrc);
+    revokeObjectUrl(player.videoSrc);
+    revokeObjectUrl(player.imageSrc);
+    player.audioSrc = null;
+    player.videoSrc = null;
+    player.imageSrc = null;
+    player.audioMode = "file";
+    player.audioDuration = 0;
+    player.isPlaying = false;
+    player.showSourceDialog = false;
+    player.dialogSources = [];
+    player.pendingSourceCallback?.(null);
+    player.pendingSourceCallback = null;
+    player.ytPlayerReady = false;
+    player.youtubeUrlInput = "";
+    player.ytVideoId = "";
+    player.showLatencyTest = false;
+    player.latencyRunning = false;
+    player.latencyTaps = [];
+    player.latencyBeatOn = false;
+    player.latencyDisplayStart = 0;
+    player.latencyAvg = null;
+    resetWaveformState();
+
+    if (folderInputRef) folderInputRef.value = "";
+  }
 
 
   async function decodeWaveform(url: string) {
@@ -184,9 +335,11 @@
     waveformPerfRef = 0;
     try {
       const buf = await fetch(url).then((r) => r.arrayBuffer());
+      if (player.audioSrc !== url || player.audioMode !== "file") return;
       const actx = new AudioContext();
       const audioBuffer = await actx.decodeAudioData(buf);
       actx.close();
+      if (player.audioSrc !== url || player.audioMode !== "file") return;
       waveformDuration = audioBuffer.duration;
 
       const ch0src = audioBuffer.getChannelData(0);
@@ -722,13 +875,13 @@
     const inTimeTag = ui.activeTab === "timetag" && tt.editorMode === "timetag";
     if (
       !inTimeTag &&
-      PLAYBACK_KEYS.has(e.key) &&
+      PLAYBACK_CODES.has(e.code) &&
       !e.ctrlKey &&
       !e.altKey &&
       !e.metaKey
     ) {
       e.preventDefault();
-      runPlaybackKey(e.key);
+      runPlaybackKey(e.code);
     }
     if (!chart.isPipeEditing) return;
     if (needsPipeReport.length === 0) {
@@ -736,13 +889,13 @@
       return;
     }
 
-    if (e.key === "Escape") {
+    if (e.code === "Escape") {
       e.preventDefault();
       endPipeEdit();
       return;
     }
 
-    if (e.key === " ") {
+    if (e.code === "Space") {
       e.preventDefault();
       if (chart.peFocus < chart.peDecisions.length) {
         const cur = chart.peDecisions[chart.peFocus];
@@ -755,13 +908,13 @@
         }
         chart.peDecisions = [...chart.peDecisions];
       }
-    } else if (e.key === "ArrowRight" || e.key === "l") {
+    } else if (e.code === "ArrowRight" || e.code === "KeyL") {
       e.preventDefault();
       if (chart.peFocus < chart.peDecisions.length - 1) chart.peFocus++;
-    } else if (e.key === "ArrowLeft" || e.key === "j") {
+    } else if (e.code === "ArrowLeft" || e.code === "KeyJ") {
       e.preventDefault();
       if (chart.peFocus > 0) chart.peFocus--;
-    } else if (e.key === "Enter") {
+    } else if (e.code === "Enter") {
       e.preventDefault();
       // 残りの未決定位置を全て "+" にして適用
       for (let i = 0; i < chart.peDecisions.length; i++) {
@@ -769,7 +922,7 @@
       }
       chart.peDecisions = [...chart.peDecisions];
       applyPipeEdit();
-    } else if (e.key === "Backspace") {
+    } else if (e.code === "Backspace") {
       e.preventDefault();
       if (chart.peFocus < chart.peDecisions.length && chart.peDecisions[chart.peFocus] !== null) {
         chart.peDecisions[chart.peFocus] = null;
@@ -837,39 +990,11 @@
   afterNavigate(() => {
     const editChart = get(page).data?.editChart;
     if (!editChart) {
-      lastLoadedChartId = null;
-      submit.editingChartId = null;
-      submit.editingUploaderId = null;
-      submit.submittedChartId = null;
-      submit.justSubmitted = false;
-      submit.loadedTitle = "";
-      submit.title = "";
-      submit.artist = "";
-      submit.description = "";
-      submit.ytVideoId = "";
-      submit.source = "";
-      submit.tags = [];
-      submit.tagInput = "";
-      submit.lastSavedSnapshot = null;
-      chart.lrcContent = "";
-      chart.lrcYtId = "";
-      chart.chartReplContent = "";
-      chart.appliedChartReplContent = "";
-      chart.showOptDiff = false;
-      chart.replOptimizeInfo = "";
-      tt.lrcText = "";
-      if (player.ytPlayer) {
-        player.ytPlayer.destroy();
-        player.ytPlayer = null;
-      }
-      player.ytPlayerReady = false;
-      player.audioMode = "file";
-      player.audioSrc = null;
-      player.ytVideoId = "";
-      player.youtubeUrlInput = "";
+      resetEditorState();
       return;
     }
     if (editChart.id === lastLoadedChartId) return;
+    resetEditorState();
     lastLoadedChartId = editChart.id;
     submit.editingChartId = editChart.id;
     submit.editingUploaderId = editChart.uploader_id;
@@ -1313,6 +1438,21 @@
   // selectEditorSource は ./_components/SourceDialog.svelte に移動済み
 
   async function loadFromFiles(files: File[], title: string) {
+    const loadVersion = ++editorStateVersion;
+    const isCurrentLoad = () => loadVersion === editorStateVersion;
+    const sources: {
+      type: string;
+      label: string;
+      url?: string;
+      videoId?: string;
+    }[] = [];
+    let selectedSource: {
+      type: string;
+      label: string;
+      url?: string;
+      videoId?: string;
+    } | null = null;
+
     ui.isProcessing = true;
     try {
       const lrcFile = files.find((f) => f.name.endsWith(".lrc"));
@@ -1323,16 +1463,11 @@
 
       // LRC から @ytid 抽出
       const lrcRaw = lrcFile ? await readFileAsText(lrcFile) : "";
+      if (!isCurrentLoad()) return;
       const ytidMatch = lrcRaw.match(/@ytid=["']?([A-Za-z0-9_-]{11})["']?/);
       const lrcYtVideoId = ytidMatch ? ytidMatch[1] : undefined;
 
       // 利用可能ソース構築
-      const sources: {
-        type: string;
-        label: string;
-        url?: string;
-        videoId?: string;
-      }[] = [];
       if (audioFile)
         sources.push({
           type: "audio",
@@ -1353,12 +1488,6 @@
         });
 
       // メディアソース選択
-      let selectedSource: {
-        type: string;
-        label: string;
-        url?: string;
-        videoId?: string;
-      } | null = null;
       if (sources.length >= 2) {
         selectedSource = await new Promise((resolve) => {
           player.dialogSources = sources;
@@ -1368,11 +1497,16 @@
       } else if (sources.length === 1) {
         selectedSource = sources[0];
       }
+      if (!isCurrentLoad()) {
+        cleanupSourceUrls(sources);
+        return;
+      }
+      cleanupSourceUrls(sources, selectedSource?.url ?? null);
 
       // 前のURLをクリーンアップ
-      if (player.audioSrc) URL.revokeObjectURL(player.audioSrc);
+      revokeObjectUrl(player.audioSrc);
       player.audioSrc = null;
-      if (player.videoSrc) URL.revokeObjectURL(player.videoSrc);
+      revokeObjectUrl(player.videoSrc);
       player.videoSrc = null;
       // YouTube → 非YouTubeの切り替え時にリセット
       if (player.ytPlayer) {
@@ -1380,7 +1514,7 @@
         player.ytPlayer = null;
       }
       player.audioMode = "file";
-      if (player.imageSrc) URL.revokeObjectURL(player.imageSrc);
+      revokeObjectUrl(player.imageSrc);
       player.imageSrc = null;
 
       if (imageFile) {
@@ -1432,6 +1566,7 @@
         let existingRepl = "";
         if (replTxtFile) {
           existingRepl = await readFileAsText(replTxtFile);
+          if (!isCurrentLoad()) return;
         }
 
         const origLen = existingRepl.trim().length;
@@ -1458,10 +1593,12 @@
         tt.lines = [];
         tt.lrcText = "";
         await tick();
+        if (!isCurrentLoad()) return;
         buildTimeTagLines();
       } else if (replTxtFile) {
         // .lrc は無いが .repl.txt はある: repl だけ既存 lrc に対して差し替える
         const existingRepl = await readFileAsText(replTxtFile);
+        if (!isCurrentLoad()) return;
         const { merged, optimized } = generateChartRepl(
           chart.lrcContent,
           chart.appliedMasterReplContent,
@@ -1474,6 +1611,7 @@
         chart.chartReplContent = optimized;
         chart.appliedChartReplContent = optimized;
         await tick();
+        if (!isCurrentLoad()) return;
         if (chart.lrcContent) buildTimeTagLines();
       }
       // lrcFile も replTxtFile も無い場合は lrc/repl/tt を一切触らない（メディアのみ差し替え済み）
@@ -1484,11 +1622,12 @@
       }
     } catch (err: unknown) {
       console.error("Error loading files:", err);
-      if (err instanceof Error) {
+      cleanupSourceUrls(sources, selectedSource?.url ?? null);
+      if (isCurrentLoad() && err instanceof Error) {
         alert("読み込みエラー: " + err.message);
       }
     } finally {
-      ui.isProcessing = false;
+      if (isCurrentLoad()) ui.isProcessing = false;
     }
   }
 
@@ -1880,6 +2019,27 @@
   // formatTime / ttIsSpace / ttEndCheckActive / applyTtCursor / ttLineEndActive
   //   / ttIsOnEndCheck / ttEndCheckTime は ./_lib/timetag/utils から import 済み
 
+  function deleteCurrentEndCheckTime(): boolean {
+    if (!ttIsOnEndCheck()) return false;
+    const ci = tt.cursorChar - 1;
+    const ch = tt.lines[tt.cursorLine]?.chars[ci];
+    if (!ch || ch.endTime === null) return false;
+
+    const prevEndTime = ch.endTime;
+    ttRecordOp({
+      type: "setEndTime",
+      li: tt.cursorLine,
+      ci,
+      prev: prevEndTime,
+      next: null,
+    });
+    ch.endTime = null;
+    tt.lines = [...tt.lines];
+    generateTtLrc();
+    rebuildWaveformTagCache();
+    return true;
+  }
+
   /** pending中のエンドチェックを即時確定 */
   function flushPendingEndCheck() {
     if (tt.pendingEndCheckKey === null) return;
@@ -1903,10 +2063,10 @@
 
   /** キーアップでエンドチェックのタグを設定 */
   function handleTtKeyup(e: KeyboardEvent) {
-    if (e.key === "Shift") ui.shiftHeld = false;
+    if (e.code === "ShiftLeft" || e.code === "ShiftRight") ui.shiftHeld = false;
     if (ui.activeTab !== "timetag" || tt.editorMode !== "timetag") return;
     if (!ttIsPlaying() || tt.pendingEndCheckKey === null) return;
-    if (e.key !== tt.pendingEndCheckKey) return;
+    if (e.code !== tt.pendingEndCheckKey) return;
 
     const lineChars = tt.lines[tt.pendingEndCheckLine]?.chars;
     if (!lineChars) {
@@ -1973,30 +2133,30 @@
 
   // 再生関係のショートカット (タブ・フォーカス位置に依存しない汎用処理)。
   // a:再生 d:再生一時停止 s:停止 z:2秒戻し x:2秒進め q:速度- w:速度+
-  const PLAYBACK_KEYS = new Set(["a", "d", "s", "z", "x", "q", "w"]);
-  function runPlaybackKey(key: string) {
-    switch (key) {
-      case "a":
+  const PLAYBACK_CODES = new Set(["KeyA", "KeyD", "KeyS", "KeyZ", "KeyX", "KeyQ", "KeyW"]);
+  function runPlaybackKey(code: string) {
+    switch (code) {
+      case "KeyA":
         playerPlay();
         break;
-      case "d":
+      case "KeyD":
         if (playerIsPaused()) playerPlay();
         else playerPause();
         break;
-      case "s":
+      case "KeyS":
         playerStop();
         break;
-      case "z":
+      case "KeyZ":
         playerSeek(playerGetTime() - 2);
         break;
-      case "x":
+      case "KeyX":
         playerSeek(playerGetTime() + 2);
         break;
-      case "q":
+      case "KeyQ":
         tt.playbackRate = Math.max(0.1, tt.playbackRate - 0.1);
         playerSetRate(tt.playbackRate);
         break;
-      case "w":
+      case "KeyW":
         tt.playbackRate = Math.min(2.0, tt.playbackRate + 0.1);
         playerSetRate(tt.playbackRate);
         break;
@@ -2005,29 +2165,28 @@
   // 下部コントロールバー (range) フォーカス時にも再生系を効かせる。
   function handleSliderKeydown(e: KeyboardEvent) {
     if (e.ctrlKey || e.altKey || e.metaKey) return; // Ctrl+Z 等は range/ブラウザに委ねる
-    if (!PLAYBACK_KEYS.has(e.key)) return;
+    if (!PLAYBACK_CODES.has(e.code)) return;
     e.preventDefault();
     e.stopPropagation(); // window 側との二重処理を防ぐ
     // TimeTag タブ表示中は従来の高度な挙動 (a=フォーカス文字から再生 等) を維持
     if (ui.activeTab === "timetag" && tt.editorMode === "timetag") {
       handleTtKeydown(e);
     } else {
-      runPlaybackKey(e.key);
+      runPlaybackKey(e.code);
     }
   }
 
   function handleTtKeydown(e: KeyboardEvent) {
     if (ui.activeTab !== "timetag" || tt.editorMode !== "timetag") return;
 
-    if (e.key === "Shift") ui.shiftHeld = true;
+    if (e.code === "ShiftLeft" || e.code === "ShiftRight") ui.shiftHeld = true;
 
     const playing = ttIsPlaying();
-    const keyLower = e.key.toLowerCase();
-    const isTagKey = e.key === " " || keyLower === "v" || keyLower === "b" || keyLower === "n";
+    const isTagKey = e.code === "Space" || e.code === "KeyV" || e.code === "KeyB" || e.code === "KeyN";
 
     // Common shortcuts (work even when tt.lines is empty)
-    switch (e.key) {
-      case "a":
+    switch (e.code) {
+      case "KeyA":
         e.preventDefault();
         if (e.shiftKey) {
           playAudioAt(0);
@@ -2071,16 +2230,16 @@
           }
         }
         return;
-      case "s":
+      case "KeyS":
         e.preventDefault();
         playerStop();
         return;
-      case "d":
+      case "KeyD":
         e.preventDefault();
         if (playerIsPaused()) playerPlay();
         else playerPause();
         return;
-      case "z":
+      case "KeyZ":
         if (e.ctrlKey) {
           e.preventDefault();
           ttUndo();
@@ -2089,35 +2248,35 @@
         e.preventDefault();
         playerSeek(playerGetTime() - 2);
         return;
-      case "y":
+      case "KeyY":
         if (e.ctrlKey) {
           e.preventDefault();
           ttRedo();
           return;
         }
         return;
-      case "x":
+      case "KeyX":
         e.preventDefault();
         playerSeek(playerGetTime() + 2);
         return;
-      case "q":
+      case "KeyQ":
         e.preventDefault();
         tt.playbackRate = Math.max(0.1, tt.playbackRate - 0.1);
         playerSetRate(tt.playbackRate);
         return;
-      case "w":
+      case "KeyW":
         e.preventDefault();
         tt.playbackRate = Math.min(2.0, tt.playbackRate + 0.1);
         playerSetRate(tt.playbackRate);
         return;
-      case "r": {
+      case "KeyR": {
         e.preventDefault();
         const rubyCh = tt.lines[tt.cursorLine]?.chars[tt.cursorChar]?.char;
         if (!rubyCh || /^\s$/.test(rubyCh)) return;
         openRubyEdit(tt.cursorLine, tt.cursorChar);
         return;
       }
-      case "1":
+      case "Digit1":
         e.preventDefault();
         {
           const v = Math.max(0, playerGetVolume() - 0.05);
@@ -2125,7 +2284,7 @@
           updateSetting("volume", Math.round(v * 100));
         }
         return;
-      case "2":
+      case "Digit2":
         e.preventDefault();
         {
           const v = Math.min(1, playerGetVolume() + 0.05);
@@ -2136,14 +2295,14 @@
     }
 
     // Shift+I/K/ArrowUp/Down: waveform zoom（ttLines有無に関係なく動作）
-    if (e.shiftKey && (e.key === "i" || e.key === "I" || e.key === "ArrowUp")) {
+    if (e.shiftKey && (e.code === "KeyI" || e.code === "ArrowUp")) {
       e.preventDefault();
       waveformZoomIn();
       return;
     }
     if (
       e.shiftKey &&
-      (e.key === "k" || e.key === "K" || e.key === "ArrowDown")
+      (e.code === "KeyK" || e.code === "ArrowDown")
     ) {
       e.preventDefault();
       waveformZoomOut();
@@ -2155,10 +2314,10 @@
     // Alt+Arrow/IJKL: adjust tag ±0.01s
     if (
       e.altKey &&
-      (e.key === "ArrowUp" ||
-        e.key === "ArrowDown" ||
-        e.key === "i" ||
-        e.key === "k")
+      (e.code === "ArrowUp" ||
+        e.code === "ArrowDown" ||
+        e.code === "KeyI" ||
+        e.code === "KeyK")
     ) {
       e.preventDefault();
       const cursor: TtCursor = {
@@ -2166,7 +2325,7 @@
         char: tt.cursorChar,
         check: tt.cursorCheck,
       };
-      const delta = e.key === "ArrowUp" || e.key === "i" ? 0.01 : -0.01;
+      const delta = e.code === "ArrowUp" || e.code === "KeyI" ? 0.01 : -0.01;
       const ki = cursor.check;
       const ch0 = tt.lines[cursor.line]?.chars[cursor.char];
       const prevT = ch0?.times[ki] ?? null;
@@ -2181,7 +2340,7 @@
     }
 
     // Arrow keys / IJKL: navigation
-    if (e.key === "ArrowLeft" || e.key === "j") {
+    if (e.code === "ArrowLeft" || e.code === "KeyJ") {
       e.preventDefault();
       if (tt.cursorChar > 0) tt.cursorChar--;
       else if (tt.cursorLine > 0) {
@@ -2191,7 +2350,7 @@
       tt.cursorCheck = 0;
       return;
     }
-    if (e.key === "ArrowRight" || e.key === "l") {
+    if (e.code === "ArrowRight" || e.code === "KeyL") {
       e.preventDefault();
       if (tt.cursorChar < tt.lines[tt.cursorLine].chars.length) tt.cursorChar++;
       else if (tt.cursorLine < tt.lines.length - 1) {
@@ -2201,7 +2360,7 @@
       tt.cursorCheck = 0;
       return;
     }
-    if ((e.key === "ArrowUp" || e.key === "i") && !e.altKey) {
+    if ((e.code === "ArrowUp" || e.code === "KeyI") && !e.altKey) {
       e.preventDefault();
       if (tt.cursorLine > 0) {
         tt.cursorLine--;
@@ -2214,7 +2373,7 @@
       scrollCursorToCenter();
       return;
     }
-    if ((e.key === "ArrowDown" || e.key === "k") && !e.altKey) {
+    if ((e.code === "ArrowDown" || e.code === "KeyK") && !e.altKey) {
       e.preventDefault();
       if (tt.cursorLine < tt.lines.length - 1) {
         tt.cursorLine++;
@@ -2233,6 +2392,12 @@
       char: tt.cursorChar,
       check: tt.cursorCheck,
     };
+
+    if (!e.shiftKey && e.code === "Backspace" && ttIsOnEndCheck()) {
+      e.preventDefault();
+      deleteCurrentEndCheckTime();
+      return;
+    }
 
     if (playing) {
       // === Tagging mode ===
@@ -2281,7 +2446,7 @@
           applyTtCursor(result.cursor);
           tt.lastTaggedLine = result.lastTagged.line;
           tt.lastTaggedChar = result.lastTagged.char;
-          tt.pendingEndCheckKey = e.key;
+          tt.pendingEndCheckKey = e.code;
           tt.pendingEndCheckLine = result.lastTagged.line;
           tt.pendingEndCheckChar = result.lastTagged.char;
           tt.lines = [...tt.lines];
@@ -2291,7 +2456,7 @@
         }
         return;
       }
-      if (e.key === "Enter") {
+      if (e.code === "Enter") {
         e.preventDefault();
         if (tt.lastTaggedLine >= 0 && tt.lastTaggedChar >= 0) {
           const lastTagged: TtLastTagged = {
@@ -2309,7 +2474,7 @@
         }
         return;
       }
-      if (e.shiftKey && e.key === "Backspace") {
+      if (e.shiftKey && e.code === "Backspace") {
         e.preventDefault();
         const ch0 = tt.lines[cursor.line]?.chars[cursor.char];
         if (ch0) {
@@ -2325,7 +2490,7 @@
         }
         return;
       }
-      if (e.key === "Backspace") {
+      if (e.code === "Backspace") {
         e.preventDefault();
         const prevCursor = retreatToPrevCheck(tt.lines, cursor);
         const ch0 = tt.lines[prevCursor.line]?.chars[prevCursor.char];
@@ -2338,7 +2503,7 @@
         rebuildWaveformTagCache();
         return;
       }
-      if (e.key === "Delete") {
+      if (e.code === "Delete") {
         e.preventDefault();
         const ch0 = tt.lines[cursor.line]?.chars[cursor.char];
         if (ch0) {
@@ -2367,7 +2532,7 @@
         }
         return;
       }
-      if (e.key === "Backspace") {
+      if (e.code === "Backspace") {
         e.preventDefault();
         const ch0 = tt.lines[cursor.line]?.chars[cursor.char];
         if (ch0) {
@@ -2381,7 +2546,7 @@
         }
         return;
       }
-      if (e.key === "Delete") {
+      if (e.code === "Delete") {
         e.preventDefault();
         const ch0 = tt.lines[cursor.line]?.chars[cursor.char];
         if (ch0) {

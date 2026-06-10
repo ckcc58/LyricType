@@ -19,7 +19,7 @@
   import {
     buildKaraokeUnits,
     ttCharProgress,
-    ttUnitProgress,
+    ttRubyProgress,
   } from "../_lib/timetag/karaoke";
   import { openRubyEdit } from "../_lib/timetag/ruby-edit";
 
@@ -87,6 +87,20 @@
     if (!text.trim()) return;
     e.clipboardData?.setData("text/plain", text);
     e.preventDefault();
+  }
+
+  function isRubyContinuation(line: { chars: typeof tt.lines[number]["chars"] }, ci: number): boolean {
+    for (let i = ci - 1; i >= 0; i--) {
+      const span = line.chars[i]?.rubySpan ?? 1;
+      if (span > 1 && ci < i + span) return true;
+      if (span > 1 || line.chars[i]?.reading) return false;
+    }
+    return false;
+  }
+
+  function rubyGroupStyle(reading: string, span: number): string {
+    const readingChars = [...reading].length;
+    return `--tt-ruby-width: max(${span * 1.25}rem, ${readingChars * 0.68}em)`;
   }
 </script>
 
@@ -201,12 +215,144 @@
                     </div>
                   </div>
                 {:else}
+                  {#if isRubyContinuation(line, ci)}
+                    <!-- rendered by rubySpan group start -->
+                  {:else if (ch.rubySpan ?? 1) > 1 && ch.reading !== ch.char && ch.reading}
+                    {@const rubySpan = Math.min(
+                      ch.rubySpan ?? 1,
+                      line.chars.length - ci,
+                    )}
+                    {@const groupProgress = ttRubyProgress(
+                      line,
+                      ci,
+                      tt.displayTime,
+                    )}
+                    <div
+                      class="ttRubyGroup"
+                      style={rubyGroupStyle(ch.reading, rubySpan)}
+                    >
+                      <span class="ttRuby ttRubyGroupLabel"
+                        ><span class="ttRubyText ttRubyTextGroup"
+                          >{ch.reading}</span
+                        ></span
+                      >
+                      <div class="ttRubyGroupBase">
+                        {#each Array(rubySpan) as _, offset}
+                          {@const subCi = ci + offset}
+                          {@const subCh = line.chars[subCi]}
+                          {@const karaokeProgress = ttCharProgress(
+                            karaokeUnits,
+                            subCi,
+                            tt.displayTime,
+                          )}
+                          {@const isCursorChar =
+                            li === tt.cursorLine && subCi === tt.cursorChar}
+                          {@const taggingNext = isCursorChar && player.isPlaying}
+                          {@const row1Count = Math.min(subCh.checkCount, 4)}
+                          {@const row2Count = Math.max(
+                            0,
+                            Math.min(subCh.checkCount, 7) - 4,
+                          )}
+                          <div
+                            class="ttCharCol ttCharInRubyGroup"
+                            class:ttCharNoCheck={subCh.checkCount === 0}
+                            class:ttCharClickable={subCh.times[0] !== null}
+                            onclick={(ev) => {
+                              tt.cursorLine = li;
+                              tt.cursorChar = subCi;
+                              tt.cursorCheck = 0;
+                              if (ev.ctrlKey) openRubyEdit(li, subCi);
+                            }}
+                            ondblclick={() => {
+                              if (subCh.times[0] !== null) {
+                                playerSeek(subCh.times[0]!);
+                              }
+                            }}
+                            role="button"
+                            tabindex="-1"
+                          >
+                            <span class="ttCharTextWrap">
+                              <span class="ttCharText">{subCh.char}</span>
+                            </span>
+                            <div class="ttCheckRows">
+                              {#if isCursorChar}
+                                <span class="ttCursorArrow"></span>
+                              {/if}
+                              <svg
+                                class="ttCheckSvg"
+                                width="18"
+                                height="6"
+                                viewBox="0 0 18 6"
+                                shape-rendering="crispEdges"
+                                aria-hidden="true"
+                              >
+                                {#each Array(row1Count) as _, i}
+                                  {@const fill =
+                                    taggingNext && i === tt.cursorCheck
+                                      ? "#ff7878"
+                                      : "#fff"}
+                                  {#if i === 0}
+                                    <polygon points="0,0 0,6 6,6" {fill} />
+                                  {:else}
+                                    <rect x={4 + 3 * i} y="0" width="2" height="6" {fill} />
+                                  {/if}
+                                {/each}
+                              </svg>
+                              <svg
+                                class="ttCheckSvg"
+                                width="18"
+                                height="6"
+                                viewBox="0 0 18 6"
+                                shape-rendering="crispEdges"
+                                aria-hidden="true"
+                              >
+                                <polygon
+                                  points="0,0 0,6 6,6"
+                                  fill={subCh.times[0] != null
+                                    ? "#555"
+                                    : "transparent"}
+                                />
+                                {#each Array(row2Count) as _, i}
+                                  {@const fill =
+                                    taggingNext && i + 4 === tt.cursorCheck
+                                      ? "#ff7878"
+                                      : "#fff"}
+                                  <rect x={7 + 3 * i} y="0" width="2" height="6" {fill} />
+                                {/each}
+                              </svg>
+                            </div>
+                          </div>
+                        {/each}
+                      </div>
+                      {#if groupProgress > 0}
+                        <div
+                          class="ttRubyGroupKaraoke"
+                          style="clip-path: inset(-4px {(1 - groupProgress) *
+                            100}% -4px 0)"
+                          aria-hidden="true"
+                        >
+                          <span class="ttRuby ttRubyGroupLabel"
+                            ><span class="ttRubyText ttRubyTextGroup"
+                              >{ch.reading}</span
+                            ></span
+                          >
+                          <div class="ttRubyGroupBase ttRubyGroupBaseKaraoke">
+                            {#each Array(rubySpan) as _, offset}
+                              {@const subCh = line.chars[ci + offset]}
+                              <span
+                                class="ttCharCol ttCharInRubyGroup ttCharKaraokeClone"
+                              >
+                                <span class="ttCharTextWrap">
+                                  <span class="ttCharText">{subCh.char}</span>
+                                </span>
+                              </span>
+                            {/each}
+                          </div>
+                        </div>
+                      {/if}
+                    </div>
+                  {:else}
                   {@const karaokeProgress = ttCharProgress(
-                    karaokeUnits,
-                    ci,
-                    tt.displayTime,
-                  )}
-                  {@const rubyProgress = ttUnitProgress(
                     karaokeUnits,
                     ci,
                     tt.displayTime,
@@ -247,23 +393,34 @@
                       >{#if ch.reading !== ch.char && ch.reading}<span
                           class="ttRubyText"
                           class:ttRubyTextGroup={rubySpan > 1}>{ch.reading}</span
-                        >{#if rubyProgress > 0}<span
-                            class="ttRubyKaraoke"
-                            class:ttRubyTextGroup={rubySpan > 1}
-                            style="clip-path: inset(-4px {(1 - rubyProgress) *
-                              100}% -4px 0)">{ch.reading}</span
-                          >{/if}{/if}</span
+                        >{/if}</span
                     >
                     <span class="ttCharTextWrap">
                       <span class="ttCharText">{ch.char}</span>
-                      {#if karaokeProgress > 0}
-                        <span
-                          class="ttCharKaraoke"
-                          style="clip-path: inset(0 {(1 - karaokeProgress) *
-                            100}% 0 0)">{ch.char}</span
-                        >
-                      {/if}
                     </span>
+                    {#if karaokeProgress > 0}
+                      <span
+                        class="ttCharColKaraoke"
+                        style="clip-path: inset(-4px {(1 - karaokeProgress) *
+                          100}% -4px 0)"
+                        aria-hidden="true"
+                      >
+                        <span
+                          class="ttRuby"
+                          style={rubySpan > 1
+                            ? `--tt-ruby-width: ${rubySpan}rem`
+                            : undefined}
+                          >{#if ch.reading !== ch.char && ch.reading}<span
+                              class="ttRubyText"
+                              class:ttRubyTextGroup={rubySpan > 1}
+                              >{ch.reading}</span
+                            >{/if}</span
+                        >
+                        <span class="ttCharTextWrap">
+                          <span class="ttCharText">{ch.char}</span>
+                        </span>
+                      </span>
+                    {/if}
                     <div class="ttCheckRows">
                       {#if isCursorChar}
                         <span class="ttCursorArrow"></span>
@@ -317,6 +474,7 @@
                       </svg>
                     </div>
                   </div>
+                  {/if}
                 {/if}
               {/each}
               <!-- □ endTime marker at line end -->
@@ -442,6 +600,7 @@
     font-size: 12px;
     font-family: monospace;
     flex-shrink: 0;
+    width: 15px;
     text-align: right;
     user-select: none;
     margin-right: 12px;
@@ -454,6 +613,7 @@
     gap: 0;
   }
   .ttCharCol {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -509,6 +669,57 @@
     min-width: 1rem;
     text-align: center;
   }
+  .ttRubyGroup {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    align-self: flex-start;
+    width: var(--tt-ruby-width);
+    min-width: var(--tt-ruby-width);
+    padding: 2px 0;
+    border-radius: 3px;
+    transition: background 0.1s;
+  }
+  .ttRubyGroupLabel {
+    width: 100%;
+    min-width: 100%;
+  }
+  .ttRubyGroupBase {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+  }
+  .ttRubyGroupKaraoke {
+    position: absolute;
+    top: 2px;
+    left: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    height: calc(100% - 4px);
+    color: #f80;
+    pointer-events: none;
+    user-select: none;
+  }
+  .ttRubyGroupKaraoke .ttRuby,
+  .ttRubyGroupKaraoke .ttCharText,
+  .ttCharColKaraoke .ttRuby,
+  .ttCharColKaraoke .ttCharText {
+    color: #f80;
+  }
+  .ttRubyGroupBaseKaraoke {
+    pointer-events: none;
+  }
+  .ttCharInRubyGroup {
+    flex: 1 1 1rem;
+    min-width: 1rem;
+    padding: 0;
+  }
+  .ttCharKaraokeClone {
+    pointer-events: none;
+  }
   .ttRubyText {
     display: inline-block;
     width: 100%;
@@ -522,22 +733,11 @@
     width: var(--tt-ruby-width);
     text-align: center;
   }
-  .ttRubyKaraoke {
-    position: absolute;
-    top: 0;
-    left: 0;
-    color: #f80;
-    font-size: 10px;
-    line-height: 6px;
-    pointer-events: none;
-    user-select: none;
-    white-space: nowrap;
+  .ttRubyGroup .ttRubyTextGroup,
+  .ttRubyGroupKaraoke .ttRubyTextGroup {
+    position: static;
+    display: inline-block;
     width: 100%;
-    text-align: center;
-  }
-  .ttRubyKaraoke.ttRubyTextGroup {
-    width: var(--tt-ruby-width);
-    text-align: center;
   }
   .ttCharTextWrap {
     position: relative;
@@ -548,13 +748,14 @@
     line-height: 1.3;
     min-height: 1.3em;
   }
-  .ttCharKaraoke {
+  .ttCharColKaraoke {
     position: absolute;
-    top: 0;
+    top: 2px;
     left: 0;
-    color: #f80;
-    font-size: 18px;
-    line-height: 1.3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
     pointer-events: none;
     user-select: none;
   }

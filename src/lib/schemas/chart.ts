@@ -5,7 +5,6 @@ export const chartSubmitSchema = z.object({
 	repl_raw: z.string().max(500_000).default(''),
 	title: z.string().min(1, 'タイトルが必要です').max(200),
 	artist: z.string().max(200).default(''),
-	difficulty: z.number().int().min(0).max(99).default(0),
 	description: z.string().max(2000).default(''),
 	youtube_video_id: z
 		.string()

@@ -433,6 +433,42 @@ export class ChartGame {
     );
   }
 
+  private static updateNextLinesPreview(status: LyricStatus) {
+    if (!this.chart) return;
+
+    const activeLineSet = new Set(status.activeLrcs.map((l) => l.line));
+    const finishedSet = new Set(status.finishedLines);
+    const nextLineSet = new Set<number>();
+
+    for (let i = status.phraseCount; i < this.chart.lyric.length; i++) {
+      const ln = this.chart.lyric[i].line;
+      if (!activeLineSet.has(ln) && !finishedSet.has(ln)) {
+        nextLineSet.add(ln);
+        status.concurrentGroups.get(ln)?.forEach((cl) => {
+          if (!activeLineSet.has(cl) && !finishedSet.has(cl))
+            nextLineSet.add(cl);
+        });
+        break;
+      }
+    }
+
+    const nextLinesData = [...nextLineSet]
+      .map((ln) => {
+        const phrases = this.chart!.lyric.filter((l) => l.line === ln);
+        return {
+          line: ln,
+          text: phrases
+            .map((p) => p.segments.map((s) => s.text).join(""))
+            .join(""),
+          startTime:
+            status.lineTimes.get(ln)?.start ?? phrases[0]?.time ?? 0,
+        };
+      })
+      .sort((a, b) => a.line - b.line);
+
+    this.nextLines.set(nextLinesData);
+  }
+
   static async load(parsedChart: Chart) {
     this.chart = parsedChart;
     this.lrcStatus = new LyricStatus(this.chart.lyric);
@@ -446,6 +482,7 @@ export class ChartGame {
     const status = this.lrcStatus;
 
     this.init();
+    this.updateNextLinesPreview(status);
 
     // Set max base score for clear rate calculation
     this.maxBaseScore.set(status.notes * this.BASE_SCORE);
@@ -1404,6 +1441,7 @@ export class ChartGame {
     switch (e.code) {
       case "Enter":
         if (!e.isComposing && e.shiftKey) {
+          e.preventDefault();
           // 猶予期間中 or 全フレーズクリア済み → リザルト表示
           const allCleared =
             status.phraseCount >= this.chart.lyric.length &&
@@ -1420,12 +1458,16 @@ export class ChartGame {
         }
         break;
       case "ArrowRight":
-        if (e.shiftKey && !e.ctrlKey && !e.isComposing)
+        if (e.shiftKey && !e.ctrlKey && !e.isComposing) {
+          e.preventDefault();
           this.audio.currentTime += 5;
+        }
         break;
       case "ArrowLeft":
-        if (e.shiftKey && !e.ctrlKey && !e.isComposing && !this.disallowRewind)
+        if (e.shiftKey && !e.ctrlKey && !e.isComposing && !this.disallowRewind) {
+          e.preventDefault();
           this.audio.currentTime -= 5;
+        }
         break;
     }
   };
@@ -1733,42 +1775,8 @@ export class ChartGame {
           .sort((a, b) => a.line - b.line);
 
         this.renderedLyrics.set(newRenderedCoords);
-      }
 
-      // Compute next lines preview (always, not just on hasChange)
-      {
-        const activeLineSet = new Set(status.activeLrcs.map((l) => l.line));
-        const finishedSet = new Set(status.finishedLines);
-        const nextLineSet = new Set<number>();
-
-        for (let i = status.phraseCount; i < this.chart.lyric.length; i++) {
-          const ln = this.chart.lyric[i].line;
-          if (!activeLineSet.has(ln) && !finishedSet.has(ln)) {
-            nextLineSet.add(ln);
-            status.concurrentGroups.get(ln)?.forEach((cl) => {
-              if (!activeLineSet.has(cl) && !finishedSet.has(cl))
-                nextLineSet.add(cl);
-            });
-            break;
-          }
-        }
-
-        const nextLinesData = [...nextLineSet]
-          .map((ln) => {
-            const phrases = this.chart.lyric.filter((l) => l.line === ln);
-            return {
-              line: ln,
-              text: phrases
-                .map((p) => p.segments.map((s) => s.text).join(""))
-                .join(""),
-              startTime:
-                status.lineTimes.get(ln)?.start ?? phrases[0]?.time ?? 0,
-            };
-          })
-          // LRC の書かれた行番号順にソート（タイムタグの微差で順序が揺れないようにするため）
-          .sort((a, b) => a.line - b.line);
-
-        this.nextLines.set(nextLinesData);
+        this.updateNextLinesPreview(status);
       }
 
       // --- 曲終了 → 猶予期間 → リザルト ---

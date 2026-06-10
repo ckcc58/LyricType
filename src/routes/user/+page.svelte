@@ -58,7 +58,7 @@
 
 		<section>
 			<h2>ハンドル <span class="at">@</span></h2>
-			<p class="desc">URLに使用されます。変更後30日間は他のユーザーが同じハンドルを使用できません。</p>
+			<p class="desc">変更後30日間は他のユーザーが同じハンドルを使用できません。</p>
 			<div class="field-row">
 				<input
 					type="text"

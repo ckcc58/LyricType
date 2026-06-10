@@ -178,10 +178,18 @@
 
         // inputフォーカス検知
         const onFocusIn = (e: FocusEvent) => {
-            if ((e.target as HTMLElement)?.id === 'text-input') inputFocused = true;
+            if ((e.target as HTMLElement)?.id === 'text-input') {
+                queueMicrotask(() => {
+                    inputFocused = true;
+                });
+            }
         };
         const onFocusOut = (e: FocusEvent) => {
-            if ((e.target as HTMLElement)?.id === 'text-input') inputFocused = false;
+            if ((e.target as HTMLElement)?.id === 'text-input') {
+                queueMicrotask(() => {
+                    inputFocused = false;
+                });
+            }
         };
         document.addEventListener('focusin', onFocusIn);
         document.addEventListener('focusout', onFocusOut);

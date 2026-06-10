@@ -50,12 +50,12 @@ export function startLatencyTest(): void {
 /** Esc / Space / n のキー入力ハンドラ */
 export function handleLatencyKeydown(e: KeyboardEvent): void {
   if (!player.showLatencyTest) return;
-  if (e.key === "Escape") {
+  if (e.code === "Escape") {
     e.preventDefault();
     closeLatencyTest();
     return;
   }
-  if (e.key !== " " && e.key !== "v" && e.key !== "b" && e.key !== "n") return;
+  if (e.code !== "Space" && e.code !== "KeyV" && e.code !== "KeyB" && e.code !== "KeyN") return;
   if (!player.latencyRunning || latencyBeatTimes.length === 0) return;
   e.preventDefault();
   const tapTime = performance.now();

@@ -114,6 +114,18 @@ function extractPhrasesWithKuromoji(
   return [...result];
 }
 
+function extractPhrasesFallback(text: string, missingChars: Set<string>): string[] {
+  const result = new Set<string>();
+  const phraseRegExp = /[一-鿿々〆ぁ-んァ-ンー]+/g;
+  for (const match of text.matchAll(phraseRegExp)) {
+    const phrase = match[0];
+    if ([...phrase].some((c) => missingChars.has(c))) {
+      result.add(phrase);
+    }
+  }
+  return [...result];
+}
+
 function postProcessRepl(replText: string): string {
   return replText
     .split("\n")
@@ -164,13 +176,20 @@ export const POST: RequestHandler = async ({ request, locals }) => {
   let phrases: string[];
 
   if (body.lrcText && body.missingChars?.length) {
-    const tokenizer = await getTokenizer();
     const missingSet = new Set(body.missingChars);
-    phrases = extractPhrasesWithKuromoji(
-      tokenizer,
-      body.lrcText,
-      missingSet,
-    ).filter((p) => /[一-鿿々〆]/.test(p));
+    try {
+      const tokenizer = await getTokenizer();
+      phrases = extractPhrasesWithKuromoji(
+        tokenizer,
+        body.lrcText,
+        missingSet,
+      ).filter((p) => /[一-鿿々〆]/.test(p));
+    } catch (err) {
+      console.warn("kuromoji unavailable, using fallback extraction:", err);
+      phrases = extractPhrasesFallback(body.lrcText, missingSet).filter((p) =>
+        /[一-鿿々〆]/.test(p),
+      );
+    }
   } else {
     phrases = (body.phrases ?? []).filter((p) => /[一-鿿々〆]/.test(p));
   }

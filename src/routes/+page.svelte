@@ -17,7 +17,6 @@
     artist: string | null;
     source: string | null;
     tags: string[] | null;
-    difficulty: number | null;
     avg_cpm: number | null;
     median_cpm: number | null;
     peak_cpm: number | null;

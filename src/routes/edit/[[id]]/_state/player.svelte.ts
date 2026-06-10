@@ -21,7 +21,7 @@ class PlayerState {
   showSourceDialog = $state(false);
   dialogSources: DialogSource[] = $state([]);
   // 非リアクティブ: 関数オブジェクトをそのまま保持
-  pendingSourceCallback: ((source: DialogSource) => void) | null = null;
+  pendingSourceCallback: ((source: DialogSource | null) => void) | null = null;
 
   // YouTube
   // 非リアクティブ: YT.Playerのメソッドを Svelte5 プロキシ経由で破壊しないため、
