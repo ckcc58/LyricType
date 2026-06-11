@@ -74,6 +74,37 @@
     return passedChars;
   }
 
+  function measurePhraseWidth(node: HTMLElement, cleared: boolean) {
+    const phrase = node.querySelector<HTMLElement>(".phrase");
+    let observer: ResizeObserver | null = null;
+
+    const measure = () => {
+      if (cleared) return;
+      const width = Array.from(node.children).reduce((sum, child) => {
+        return sum + (child as HTMLElement).getBoundingClientRect().width;
+      }, 0);
+      if (width > 0) {
+        node.style.setProperty("--phrase-width", `${width}px`);
+      }
+    };
+
+    requestAnimationFrame(measure);
+    if (phrase && "ResizeObserver" in window) {
+      observer = new ResizeObserver(measure);
+      observer.observe(phrase);
+    }
+
+    return {
+      update(nextCleared: boolean) {
+        cleared = nextCleared;
+        if (!cleared) requestAnimationFrame(measure);
+      },
+      destroy() {
+        observer?.disconnect();
+      },
+    };
+  }
+
   function progressPx(node: HTMLElement, passedChars: number) {
     let lastPx = 0;
     let lastSparkTime = 0;
@@ -279,7 +310,11 @@
           >
             {#if line}
               {#each line.items as item}
-                <div class="lyric-wrapper" class:cleared={item.isCleared}>
+                <div
+                  class="lyric-wrapper"
+                  class:cleared={item.isCleared}
+                  use:measurePhraseWidth={item.isCleared}
+                >
                   {#if item.data.phrase.trim() === ""}
                     {#each item.data.phrase as char}
                       {#if char === "　"}<span class="zs"></span>
@@ -1002,20 +1037,23 @@
   }
 
   .lyric-wrapper.cleared {
-    max-width: 0;
+    width: 0;
     opacity: 0;
     margin: 0;
     padding: 0;
-    transform: scale(0.8);
     overflow: hidden;
   }
 
   .lyric-wrapper {
     display: inline-flex;
+    width: var(--phrase-width, auto);
     opacity: 1;
-    max-width: 500px;
-    transform: scale(1);
-    transition: all 0.3s ease-out;
+    overflow: visible;
+    transition:
+      width 0.1s ease-out,
+      opacity 0.1s ease-out,
+      margin 0.1s ease-out,
+      padding 0.1s ease-out;
     vertical-align: bottom;
   }
 
@@ -1026,7 +1064,13 @@
     background-clip: content-box;
     box-sizing: border-box;
     position: relative;
+    transform-origin: right center;
+    transition: transform 0.3s ease-out;
     vertical-align: bottom;
+  }
+
+  .lyric-wrapper.cleared .phrase {
+    transform: scaleX(0);
   }
 
   /* ruby の無い phrase で、先頭文字の rt にこのクラスが付く。

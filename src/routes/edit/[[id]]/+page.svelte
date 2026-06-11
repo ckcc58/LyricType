@@ -2828,6 +2828,7 @@
         {optimizeDiff}
         {missingKanjiReport}
         {needsPipeReport}
+        isLoggedIn={$page.data.isLoggedIn === true}
         {updateChartReplOnly}
         {mergeFromMaster}
         {generateReplLiteTest}

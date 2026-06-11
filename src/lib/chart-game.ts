@@ -631,6 +631,48 @@ export class ChartGame {
     return /[ぁ-んァ-ヶー々〆一-鿿～〜]/.test(last);
   }
 
+  private static toComparableInput(value: string): string {
+    return value
+      .replace(/[０-９Ａ-Ｚａ-ｚ]/g, (c) =>
+        String.fromCharCode(c.charCodeAt(0) - 0xfee0),
+      )
+      .replace(/[ァ-ヶ]/g, (c) =>
+        String.fromCharCode(c.charCodeAt(0) - 0x60),
+      )
+      .toLowerCase();
+  }
+
+  private static phraseMatchCandidates(item: Chart["lyric"][number]): string[] {
+    let candidates = [""];
+    for (const seg of item.segments) {
+      const options = Array.from(
+        new Set([seg.normalizedText, seg.normalizedReading].filter(Boolean)),
+      ).map((s) => this.toComparableInput(s));
+
+      const next: string[] = [];
+      for (const base of candidates) {
+        for (const option of options) {
+          next.push(base + option);
+        }
+      }
+      candidates = next.slice(0, 64);
+    }
+    return candidates;
+  }
+
+  private static hasLongerPrefixCandidate(inputStr: string): boolean {
+    if (!this.lrcStatus) return false;
+    const input = this.toComparableInput(inputStr);
+    if (!input) return false;
+
+    return this.lrcStatus.unClearLrcs.some((item) =>
+      this.phraseMatchCandidates(item).some(
+        (candidate) =>
+          candidate.length > input.length && candidate.startsWith(input),
+      ),
+    );
+  }
+
   // Logic for granular matching
   // offset: existing matched length in THIS segment (for partial text consumption)
   static matchSegment(
@@ -939,7 +981,12 @@ export class ChartGame {
       }
     }
 
-    return hasAnyMatch && allMatchesAreTextPerfect && currentInput.length === 0;
+    return (
+      hasAnyMatch &&
+      allMatchesAreTextPerfect &&
+      currentInput.length === 0 &&
+      !this.hasLongerPrefixCandidate(inputStr)
+    );
   }
 
   // 累積 chunks から segment ごとの baseScore を計算（合計）

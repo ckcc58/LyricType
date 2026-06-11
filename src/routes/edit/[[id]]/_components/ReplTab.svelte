@@ -32,6 +32,7 @@
     missingKanjiReport: MissingKanjiEntry[];
     /** needsPipe レポート (同上) */
     needsPipeReport: NeedsPipeEntry[];
+    isLoggedIn: boolean;
     // ボタンハンドラ
     updateChartReplOnly: () => void;
     mergeFromMaster: () => void;
@@ -44,6 +45,7 @@
     optimizeDiff = [],
     missingKanjiReport,
     needsPipeReport,
+    isLoggedIn,
     updateChartReplOnly,
     mergeFromMaster,
     generateReplLiteTest,
@@ -218,14 +220,16 @@
           Skip {chart.ignorePipeSet.size}
         </span>
       {/if}
-      <button
-        class="addReadingBtn"
-        onclick={generateReplLiteTest}
-        disabled={chart.isGeneratingReplLite || !chart.lrcContent.trim() || missingKanjiReport.length === 0}
-        title="漢字の読みを生成して追加"
-      >
-        {chart.isGeneratingReplLite ? "生成中…" : "読み追加"}
-      </button>
+      {#if isLoggedIn}
+        <button
+          class="addReadingBtn"
+          onclick={generateReplLiteTest}
+          disabled={chart.isGeneratingReplLite || !chart.lrcContent.trim() || missingKanjiReport.length === 0}
+          title="漢字の読みを生成して追加"
+        >
+          {chart.isGeneratingReplLite ? "生成中…" : "読み追加"}
+        </button>
+      {/if}
     </h2>
     <div class="missingList">
       {#if !chart.lrcContent}
