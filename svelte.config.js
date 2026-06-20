@@ -8,9 +8,11 @@ const config = {
 	preprocess: vitePreprocess(),
 
 	kit: {
-		// adapter-auto only supports some environments, see https://svelte.dev/docs/kit/adapter-auto for a list.
-		// If your environment is not supported, or you settled on a specific environment, switch out the adapter.
-		// See https://svelte.dev/docs/kit/adapters for more information about adapters.
+		// adapter-auto は Vercel 上ではインストール済みの @sveltejs/adapter-vercel@5 を使う。
+		// ローカル(Windows)では adapter-vercel の出力が symlink 権限の問題で失敗するため、
+		// 明示指定ではなく adapter-auto のまま運用する(ローカルビルドでは adapter は no-op)。
+		// 重い依存(kuromoji / AI SDK)を持つルートは各 +server.ts 側の
+		// `export const config = { split: true }` で個別 Function に分離している。
 		adapter: adapter()
 	}
 };

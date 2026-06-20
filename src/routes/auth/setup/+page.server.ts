@@ -1,6 +1,7 @@
 import { fail, redirect } from '@sveltejs/kit';
 import { z } from 'zod';
 import type { Actions, PageServerLoad } from './$types';
+import { clearProfileCookie } from '$lib/server/profile-cookie';
 
 const handleSchema = z
 	.string()
@@ -25,7 +26,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 };
 
 export const actions: Actions = {
-	default: async ({ request, locals }) => {
+	default: async ({ request, locals, cookies }) => {
 		if (!locals.user) {
 			redirect(303, '/auth/login');
 		}
@@ -90,6 +91,9 @@ export const actions: Actions = {
 			console.error('Profile insert error:', error);
 			return fail(500, { error: 'プロフィールの作成に失敗しました' });
 		}
+
+		// プロフィールキャッシュ Cookie をバストして次リクエストで再取得させる
+		clearProfileCookie(cookies);
 
 		redirect(303, '/');
 	}

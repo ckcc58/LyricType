@@ -13,6 +13,14 @@
     countPipeCoverage,
   } from "../_lib/repl/coverage";
 
+  // 歌詞フレーズは <ruby>/<rt> タグを含みうる文字列で、素の歌詞はユーザー入力(LRC)
+  // 由来。そのまま {@html} で描画すると任意 HTML/スクリプトが実行される XSS になるため、
+  // ruby の読み(rt)を落としタグを除去してプレーンテキスト化する
+  // ({} 補間側でも再エスケープされるので二重に安全)。
+  function plainLineText(s: string): string {
+    return s.replace(/<rt>[\s\S]*?<\/rt>/g, "").replace(/<[^>]*>/g, "");
+  }
+
   type MissingKanjiEntry = {
     lineIndex: number;
     lineText: string;
@@ -258,7 +266,7 @@
                 tabindex="0"
                 onkeydown={(e) => {
                   if (e.key === "Enter") playAudioAt(item.startTime || 0);
-                }}>{@html item.lineText}</span
+                }}>{plainLineText(item.lineText)}</span
               >
             </div>
           {/each}

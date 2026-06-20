@@ -26,8 +26,17 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 	}
 
 	const list = charts ?? [];
-	return json({
-		charts: list,
-		nextPage: list.length === PAGE_SIZE ? page + 1 : null
-	});
+	return json(
+		{
+			charts: list,
+			nextPage: list.length === PAGE_SIZE ? page + 1 : null
+		},
+		{
+			// 全ユーザー共通の公開データなので CDN で短期キャッシュする
+			// (ブラウザ側は TanStack Query の staleTime で制御)
+			headers: {
+				'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300'
+			}
+		}
+	);
 };

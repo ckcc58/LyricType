@@ -1,10 +1,14 @@
 import { json } from '@sveltejs/kit';
+import type { Config } from '@sveltejs/adapter-vercel';
 import type { RequestHandler } from './$types';
 import { GOOGLE_API_KEY, YOUTUBE_API_KEY, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN } from '$env/static/private';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { generateText } from 'ai';
+
+// AI SDK を含む重いルートなので個別 Function に分離する
+export const config: Config = { split: true };
 
 const ratelimit = new Ratelimit({
 	redis: new Redis({ url: UPSTASH_REDIS_REST_URL, token: UPSTASH_REDIS_REST_TOKEN }),

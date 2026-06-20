@@ -159,9 +159,12 @@
           {#if chart.youtube_video_id}
             <img
               class="chart-thumb"
-              src="https://img.youtube.com/vi/{chart.youtube_video_id}/mqdefault.jpg"
+              src="https://i.ytimg.com/vi/{chart.youtube_video_id}/mqdefault.jpg"
               alt=""
               loading="lazy"
+              decoding="async"
+              width="320"
+              height="180"
             />
           {:else}
             <div

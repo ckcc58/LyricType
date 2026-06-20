@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { z } from 'zod';
 import type { RequestHandler } from './$types';
+import { clearProfileCookie } from '$lib/server/profile-cookie';
 import { UPSTASH_REDIS_REST_TOKEN, UPSTASH_REDIS_REST_URL } from '$env/static/private';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
@@ -30,7 +31,7 @@ const nameSchema = z
 	.min(1, '表示名は1文字以上')
 	.max(30, '表示名は30文字以下');
 
-export const PATCH: RequestHandler = async ({ request, locals }) => {
+export const PATCH: RequestHandler = async ({ request, locals, cookies }) => {
 	if (!locals.user || !locals.profile) {
 		return json({ error: 'ログインが必要です' }, { status: 401 });
 	}
@@ -65,6 +66,8 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
 			if (error) {
 				return json({ error: '表示名の更新に失敗しました' }, { status: 500 });
 			}
+
+			clearProfileCookie(cookies);
 		}
 	}
 
@@ -100,6 +103,7 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
 				return json({ error: 'ハンドルの更新に失敗しました' }, { status: 500 });
 			}
 
+			clearProfileCookie(cookies);
 			return json({ ok: true });
 		}
 
@@ -150,6 +154,8 @@ export const PATCH: RequestHandler = async ({ request, locals }) => {
 		if (error) {
 			return json({ error: 'ハンドルの更新に失敗しました' }, { status: 500 });
 		}
+
+		clearProfileCookie(cookies);
 	}
 
 	return json({ ok: true });

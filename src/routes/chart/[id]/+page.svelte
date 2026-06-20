@@ -18,11 +18,13 @@
 
     // 譜面本体は SSR HTML から外して、クライアントから別 API で取得する。
     // queryKey に updated_at を含めるので、譜面が更新されたら自動的に別キー扱いとなり再取得される。
+    // ?v= 付き URL はサーバー側で immutable キャッシュされる(更新で URL ごと変わる)。
     const chartVersion = data.chart.updated_at ?? data.chart.created_at;
+    const chartDataUrl = `/api/chart/${data.chart.id}/data?v=${encodeURIComponent(chartVersion)}`;
     const chartDataQuery = createQuery<{ chart_data: ChartDataJSON; version: string }>(() => ({
         queryKey: ['chart-data', data.chart.id, chartVersion],
         queryFn: async () => {
-            const res = await fetch(`/api/chart/${data.chart.id}/data`);
+            const res = await fetch(chartDataUrl);
             if (!res.ok) throw new Error('failed to load chart');
             return res.json();
         },
@@ -300,25 +302,46 @@
         media.set(chart.media);
         imageURL.set(chart.imageURL);
         await tick();
-        await ensureYouTubeIframeApi();
-        createGameYTPlayer(videoId, chart);
+        // onMount で先行生成済みならここでは待つだけ(iframe 起動と譜面データ取得が並列になる)
+        await prepareGameYTPlayer(videoId);
+        // プレイヤー再利用時(リプレイ切替等)に前回の再生位置が残っていたら頭出しする
+        const player = (window as any).__ytPlayerGame as YT.Player | undefined;
+        if (player && typeof player.getCurrentTime === "function" && player.getCurrentTime() > 0.5) {
+            player.seekTo(0, true);
+            player.pauseVideo();
+        }
+        ChartGame.load(chart);
     }
 
-    function createGameYTPlayer(videoId: string, chart: ParsedChart) {
-        const container = document.getElementById("yt-player-game");
-        if (!container) return;
-        if ((window as any).__ytPlayerGame) {
-            (window as any).__ytPlayerGame.destroy();
-        }
-        (window as any).__ytPlayerGame = new YT.Player("yt-player-game", {
-            videoId,
-            playerVars: { rel: 0, modestbranding: 1, controls: 0, cc_load_policy: 0, iv_load_policy: 3 },
-            events: {
-                onReady: () => {
-                    ChartGame.load(chart);
-                },
-            },
-        });
+    // 生成済み/生成中プレイヤーの管理。videoId が同じなら同一の準備 Promise を共有する
+    let ytPlayerPrep: { videoId: string; promise: Promise<void> } | null = null;
+
+    function prepareGameYTPlayer(videoId: string): Promise<void> {
+        if (ytPlayerPrep?.videoId === videoId) return ytPlayerPrep.promise;
+        const promise = (async () => {
+            // コンテナ(#yt-player-game)を描画させるため、譜面データ到着前でも media を youtube にしておく
+            if (get(media).type !== "youtube") {
+                media.set({ url: "", type: "youtube", videoId });
+            }
+            await tick();
+            await ensureYouTubeIframeApi();
+            const container = document.getElementById("yt-player-game");
+            if (!container) return;
+            if ((window as any).__ytPlayerGame) {
+                (window as any).__ytPlayerGame.destroy();
+            }
+            await new Promise<void>((resolve) => {
+                (window as any).__ytPlayerGame = new YT.Player("yt-player-game", {
+                    videoId,
+                    playerVars: { rel: 0, modestbranding: 1, controls: 0, cc_load_policy: 0, iv_load_policy: 3 },
+                    events: {
+                        onReady: () => resolve(),
+                    },
+                });
+            });
+        })();
+        ytPlayerPrep = { videoId, promise };
+        return promise;
     }
 
     async function handleStartKey(e: KeyboardEvent) {
@@ -353,7 +376,8 @@
 
     onMount(() => {
         if (data.chart.youtube_video_id) {
-            void ensureYouTubeIframeApi();
+            // 譜面データの取得を待たずに YT プレイヤーを先行生成する
+            void prepareGameYTPlayer(data.chart.youtube_video_id);
         }
 
         addKeyHandler();
@@ -405,6 +429,11 @@
         };
     });
 </script>
+
+<svelte:head>
+    <!-- ハイドレーション完了を待たず、HTML パース時点で譜面データの取得を開始させる -->
+    <link rel="preload" as="fetch" href={chartDataUrl} />
+</svelte:head>
 
 <div id="game" class:input-focused={inputFocused} class:hover-top={hoverTop} class:hover-left={hoverLeft}>
     <!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -553,9 +582,12 @@
                             {#if c.youtube_video_id}
                                 <img
                                     class="other-chart-thumb"
-                                    src="https://img.youtube.com/vi/{c.youtube_video_id}/default.jpg"
+                                    src="https://i.ytimg.com/vi/{c.youtube_video_id}/default.jpg"
                                     alt=""
                                     loading="lazy"
+                                    decoding="async"
+                                    width="120"
+                                    height="90"
                                 />
                             {:else}
                                 <div class="other-chart-thumb other-chart-thumb-placeholder"></div>

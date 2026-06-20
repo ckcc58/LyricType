@@ -20,7 +20,7 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 	if (request.headers.get('if-none-match') === etag) {
 		return new Response(null, {
 			status: 304,
-			headers: { etag, 'cache-control': 'private, no-cache' }
+			headers: { etag, 'cache-control': 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600' }
 		});
 	}
 
@@ -29,7 +29,7 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 			headers: {
 				'Content-Type': 'text/plain; charset=utf-8',
 				etag,
-				'cache-control': 'private, no-cache'
+				'cache-control': 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600'
 			}
 		});
 	}
@@ -58,7 +58,7 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 		headers: {
 			'Content-Type': 'text/plain; charset=utf-8',
 			etag,
-			'cache-control': 'private, no-cache'
+			'cache-control': 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600'
 		}
 	});
 };

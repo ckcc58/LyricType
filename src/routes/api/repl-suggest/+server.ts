@@ -1,4 +1,5 @@
 import { json } from "@sveltejs/kit";
+import type { Config } from "@sveltejs/adapter-vercel";
 import type { RequestHandler } from "./$types";
 import {
   GOOGLE_API_KEY,
@@ -12,6 +13,10 @@ import { Redis } from "@upstash/redis";
 import kuromoji from "kuromoji";
 import path from "path";
 import { ReplParser } from "$lib/parseLyric/repl-parser";
+
+// kuromoji(辞書約17MB)と AI SDK を含む重いルートなので、個別 Function に分離して
+// 他ルート(ページ SSR・譜面データ API 等)のコールドスタートに影響させない
+export const config: Config = { split: true };
 
 const ratelimit = new Ratelimit({
   redis: new Redis({
