@@ -1,11 +1,13 @@
 <script lang="ts">
   import { ChartGame } from "$lib/chart-game.ts";
+  import { stripUntypeable } from "$lib/parseLyric/char-class.ts";
   import type { Snippet } from "svelte";
 
   let {
     resultActions,
     controlBar,
-  }: { resultActions: Snippet; controlBar?: Snippet } = $props();
+    showScrollHint = true,
+  }: { resultActions: Snippet; controlBar?: Snippet; showScrollHint?: boolean } = $props();
 
   const {
     renderedLyrics,
@@ -22,6 +24,7 @@
     replayUsername,
     replayFinalScore,
     replayKeyDisplayLog,
+    replayKeyDisplayDimmed,
   } = ChartGame;
 
   function formatKeyCode(code: string): string {
@@ -45,6 +48,82 @@
     if (code.startsWith("Numpad")) return "N" + code.slice(6);
     return code;
   }
+
+  // === リプレイのキー履歴表示 ===
+  // 文字キー(ローマ字・数字・記号・スペース)は文字列として連結し、
+  // 特殊キー(Enter/BS/変換など)は記号バッジとして表示する。
+  // code → 文字 の対応 ([通常, Shift時])
+  const CHAR_CODES: Record<string, [string, string]> = {
+    Minus: ["-", "="],
+    Equal: ["^", "~"],
+    Comma: [",", "<"],
+    Period: [".", ">"],
+    Slash: ["/", "?"],
+    Semicolon: [";", "+"],
+    Quote: [":", "*"],
+    BracketLeft: ["@", "`"],
+    BracketRight: ["[", "{"],
+    Backslash: ["]", "}"],
+    Backquote: ["`", "~"],
+    IntlYen: ["¥", "|"],
+    IntlRo: ["\\", "_"],
+    Space: ["␣", "␣"],
+  };
+
+  function charForKey(ev: { code: string; shift: boolean; ctrl: boolean }): string | null {
+    if (ev.ctrl) return null; // Ctrl コンボは特殊キー扱い (Ctrl+A 等)
+    const { code, shift } = ev;
+    if (code.startsWith("Key")) {
+      const c = code.slice(3).toLowerCase();
+      return shift ? c.toUpperCase() : c;
+    }
+    if (code.startsWith("Digit")) return code.slice(5);
+    if (code.startsWith("Numpad") && /^Numpad\d$/.test(code)) return code.slice(6);
+    const mapped = CHAR_CODES[code];
+    if (mapped) return shift ? mapped[1] : mapped[0];
+    return null;
+  }
+
+  type StreamToken =
+    | { kind: "text"; str: string }
+    | { kind: "key"; label: string; isClick: boolean; repeat: boolean; count: number };
+
+  function toStreamTokens(
+    log: { code: string; ime: boolean; repeat: boolean; shift: boolean; ctrl: boolean }[],
+  ): StreamToken[] {
+    const tokens: StreamToken[] = [];
+    // 同じ特殊キーの連打は 1 バッジにまとめて「変換 ×3」のように表示する
+    const pushKey = (label: string, isClick: boolean, repeat: boolean) => {
+      const last = tokens[tokens.length - 1];
+      if (last?.kind === "key" && last.isClick === isClick && last.label === label) {
+        last.count++;
+        last.repeat = last.repeat && repeat;
+      } else {
+        tokens.push({ kind: "key", label, isClick, repeat, count: 1 });
+      }
+    };
+    for (const ev of log) {
+      // 単独のモディファイアキーはノイズなので表示しない
+      if (/^(Shift|Control|Alt|Meta)/.test(ev.code)) continue;
+      // IME確定 は頻出ノイズなので表示しない (Enter は表示する)
+      if (ev.code === "CompositionEnd") continue;
+      const ch = charForKey(ev);
+      if (ch !== null) {
+        const last = tokens[tokens.length - 1];
+        if (last?.kind === "text") last.str += ch;
+        else tokens.push({ kind: "text", str: ch });
+      } else if (ev.code === "Click") {
+        pushKey("", true, false);
+      } else {
+        const base = formatKeyCode(ev.code);
+        const label = ev.ctrl ? `Ctrl+${base.toUpperCase()}` : base;
+        pushKey(label, false, ev.repeat);
+      }
+    }
+    return tokens;
+  }
+
+  const replayStreamTokens = $derived(toStreamTokens($replayKeyDisplayLog));
 
   let scrollHintShown = $state(true);
 
@@ -252,8 +331,16 @@
     // result tab UI removed; kept as no-op for callers
   }
 
+  // リプレイ中のみ: シークバークリックで再生位置へジャンプ
   function onProgressClick(e: MouseEvent) {
-    if ($replayMode) e.preventDefault();
+    if (!$replayMode) return;
+    e.preventDefault();
+    if ($gamePhase !== "playing" && $gamePhase !== "grace") return;
+    if ($duration <= 0) return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    ChartGame.seekReplay(ratio * $duration);
   }
 
   function onScrollDownClick() {
@@ -349,8 +436,6 @@
                             }
                             return result;
                           })()}
-                          {@const unTypeReg =
-                            /[^0-9０-９a-zA-Zａ-ｚＡ-Ｚぁ-んァ-ヶー々〆一-鿿～〜]/}
                           {@const renderedChars = (() => {
                             const chars: {
                               tChar: string;
@@ -367,7 +452,7 @@
                               const tChar = text[i];
                               const rChar = reading[i];
                               const isSymbol =
-                                tChar.replace(unTypeReg, "") === "";
+                                stripUntypeable(tChar) === "";
                               let chunk: {
                                 status: "text" | "reading";
                                 len: number;
@@ -475,32 +560,39 @@
             </div>
           {/if}
           {#if $replayMode}
-            <div id="text-input" class="replay-key-stream">
-              {#each $replayKeyDisplayLog as ev (ev.t_ms + ":" + ev.code)}
-                <span
-                  class="key-token"
-                  class:ime={ev.ime}
-                  class:repeat={ev.repeat}
-                >
-                  {#if ev.code === "Click"}
-                    <svg
-                      viewBox="0 0 16 16"
-                      width="12"
-                      height="12"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M2 1 L2 12 L5 9 L7 14 L9 13 L7 8 L11 8 Z"
-                        fill="currentColor"
-                        stroke="currentColor"
-                        stroke-width="0.5"
-                        stroke-linejoin="round"
-                      />
-                    </svg>
-                  {:else}
-                    {formatKeyCode(ev.code)}
-                  {/if}
-                </span>
+            <div
+              id="text-input"
+              class="replay-key-stream"
+              class:dimmed={$replayKeyDisplayDimmed}
+            >
+              {#each replayStreamTokens as token}
+                {#if token.kind === "text"}
+                  <span class="key-text">{token.str}</span>
+                {:else}
+                  <span class="key-token" class:repeat={token.repeat}>
+                    {#if token.isClick}
+                      <svg
+                        viewBox="0 0 16 16"
+                        width="12"
+                        height="12"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M2 1 L2 12 L5 9 L7 14 L9 13 L7 8 L11 8 Z"
+                          fill="currentColor"
+                          stroke="currentColor"
+                          stroke-width="0.5"
+                          stroke-linejoin="round"
+                        />
+                      </svg>
+                    {:else}
+                      {token.label}
+                    {/if}
+                    {#if token.count > 1}
+                      <span class="key-count">×{token.count}</span>
+                    {/if}
+                  </span>
+                {/if}
               {/each}
             </div>
           {:else}
@@ -525,9 +617,9 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           id="progress-container"
-          class:replay-clickable={false}
+          class:replay-clickable={$replayMode}
           onclick={onProgressClick}
-          role={undefined}
+          role={$replayMode ? "button" : undefined}
           tabindex={undefined}
         >
           {#if $gamePhase === "grace"}
@@ -557,7 +649,7 @@
         <span class="waiting-replay-info">Replay by {$replayUsername}</span>
       {/if}
     </div>
-    {#if scrollHintShown}
+    {#if scrollHintShown && showScrollHint}
       <button
         class="waiting-scroll-btn"
         onclick={onScrollDownClick}
@@ -651,7 +743,6 @@
     gap: 46px;
     padding-bottom: 2px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
     font-size: 0.88rem;
   }
   .status-cell {
@@ -777,7 +868,6 @@
     padding-left: 0.33rem;
     padding-bottom: 5px;
     color: rgba(255, 255, 255, 0.4);
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
     white-space: nowrap;
   }
 
@@ -863,7 +953,7 @@
     flex-direction: row;
     flex-wrap: nowrap;
     overflow: hidden;
-    justify-content: flex-end;
+    justify-content: flex-start;
     font-size: 0.95rem;
     font-family: "Segoe UI", Tahoma, monospace;
     color: rgba(255, 255, 255, 0.85);
@@ -871,27 +961,45 @@
     border-top: 1px solid rgba(160, 160, 160, 0.22);
     border-bottom: 1px solid rgba(160, 160, 160, 0.22);
   }
+  /* 文字キーの連結表示 (ローマ字・数字・記号) */
+  #input-area.replay .key-text {
+    font-family: monospace;
+    font-size: 1.1rem;
+    letter-spacing: 0.03em;
+    color: #eee;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  /* 特殊キー (Enter / BS / 変換 / Ctrl+A 等) は控えめな小バッジ表示 */
   #input-area.replay .key-token {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 18px;
-    padding: 1px 5px;
-    background-color: rgba(255, 255, 255, 0.07);
-    border: 1px solid rgba(255, 255, 255, 0.13);
+    min-width: 12px;
+    padding: 0 3px;
+    background-color: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 3px;
-    font-size: 0.85rem;
+    font-size: 0.7rem;
+    line-height: 1.5;
     white-space: nowrap;
     flex-shrink: 0;
-    color: #bbb;
-  }
-  #input-area.replay .key-token.ime {
-    background-color: rgba(255, 255, 255, 0.09);
-    border-color: rgba(255, 255, 255, 0.16);
-    color: #bbb;
+    color: #aaa;
+    align-self: center;
   }
   #input-area.replay .key-token.repeat {
     opacity: 0.55;
+  }
+  /* 連打まとめ表示の回数 (変換 ×3 の ×3 部分) */
+  #input-area.replay .key-count {
+    margin-left: 2px;
+    font-size: 0.65rem;
+    color: #ccc;
+  }
+  /* フレーズ確定後〜次の打ち始めまで: 確定した入力を薄く表示 (ゲーム演出) */
+  #input-area.replay .replay-key-stream.dimmed .key-text,
+  #input-area.replay .replay-key-stream.dimmed .key-token {
+    opacity: 0.35;
   }
 
   .replay-meta {
@@ -923,10 +1031,7 @@
   }
   #progress-container.replay-clickable {
     cursor: pointer;
-    height: 6px;
-    transition:
-      height 0.15s ease,
-      background-color 0.15s ease;
+    transition: background-color 0.15s ease;
   }
   #progress-container.replay-clickable:hover {
     background-color: rgba(255, 255, 255, 0.18);
@@ -955,6 +1060,7 @@
     bottom: 0;
     left: 0;
     height: 2px;
+    border-radius: 1px;
     background-color: #666;
   }
 
@@ -964,6 +1070,7 @@
     left: 0;
     height: 2px;
     background-color: #ffd700;
+    border-radius: 1px;
     box-shadow:
       0 0 6px #ffd700,
       0 0 2px #ffaa00;
@@ -980,27 +1087,31 @@
   .phrase-progress::after {
     content: "";
     position: absolute;
-    right: -1px;
+    right: 0;
     top: 50%;
-    transform: translateY(-50%);
-    width: 3px;
-    height: 3px;
+    /* 先頭の柔らかいグロー。バー本体と同じ金色を中心→透明にフェードさせることで、
+       静止時（一時停止・伸び切り）でも硬い白ブロックに見えないようにする。 */
+    transform: translate(50%, -50%);
+    width: 9px;
+    height: 9px;
     border-radius: 50%;
-    background: #fff;
-    box-shadow:
-      0 0 2px 1px #ffd700,
-      0 0 5px 2px rgba(255, 215, 0, 0.5);
-    animation: sparkle 0.5s ease-in-out infinite alternate;
+    background: radial-gradient(
+      circle,
+      #ffd700 0%,
+      rgba(255, 215, 0, 0.5) 40%,
+      rgba(255, 215, 0, 0) 72%
+    );
+    animation: sparkle 0.9s ease-in-out infinite alternate;
   }
 
   @keyframes sparkle {
     0% {
-      opacity: 0.6;
-      transform: translateY(-50%) scale(0.8);
+      opacity: 0.5;
+      transform: translate(50%, -50%) scale(0.8);
     }
     100% {
-      opacity: 1;
-      transform: translateY(-50%) scale(1.2);
+      opacity: 0.95;
+      transform: translate(50%, -50%) scale(1.15);
     }
   }
 
@@ -1134,7 +1245,6 @@
   .waiting-text {
     color: #fff;
     font-size: 1.8rem;
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
     text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
     background-color: rgba(0, 0, 0, 0.7);
     border-radius: 12px;
@@ -1154,7 +1264,6 @@
     display: inline-block;
     padding: 4px 12px;
     font-size: 1.2rem;
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
     color: #fff;
     background: rgba(255, 255, 255, 0.12);
     border: 1px solid rgba(255, 255, 255, 0.35);
@@ -1175,7 +1284,6 @@
     flex-direction: column;
     align-items: center;
     color: white;
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
     margin: auto;
   }
 

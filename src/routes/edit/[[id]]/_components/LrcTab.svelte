@@ -17,8 +17,10 @@
   type Props = {
     /** LRC をファイル/フォルダに保存するハンドラ (TT 再生成コールバックを内包) */
     downloadLrc: () => void;
+    /** 個別ファイルインポート (親の隠し input を開く) */
+    openImport: (kind: "lrc" | "audio" | "repl") => void;
   };
-  let { downloadLrc }: Props = $props();
+  let { downloadLrc, openImport }: Props = $props();
 
   let lrcTextareaEl: HTMLTextAreaElement | undefined = $state();
   let lrcMatchCount = $derived(
@@ -106,6 +108,9 @@
     <button class="ttBtn ttExportBtn" onclick={downloadLrc}>
       LRCエクスポート
     </button>
+    <button class="ttBtn ttImportBtn" onclick={() => openImport("lrc")}>
+      LRCインポート
+    </button>
     <div class="lrcFindBar">
       <input
         class="lrcFindInput"
@@ -174,14 +179,46 @@
       >
     </div>
   </div>
-  <textarea
-    class="ttTextEditor"
-    bind:value={tt.lrcText}
-    bind:this={lrcTextareaEl}
-    oninput={handleLrcInput}
-    spellcheck="false"
-    placeholder="LRCテキストをここに貼り付け、またはタイムタグエディタから生成されます"
-  ></textarea>
+  <div class="lrcEditorBody">
+    <textarea
+      class="ttTextEditor"
+      bind:value={tt.lrcText}
+      bind:this={lrcTextareaEl}
+      oninput={handleLrcInput}
+      spellcheck="false"
+      placeholder="LRCテキストをここに貼り付け、またはタイムタグエディタから生成されます"
+    ></textarea>
+    <div class="floatButtons">
+      <button
+        class="floatBtn copyBtn"
+        onclick={() => {
+          navigator.clipboard.writeText(tt.lrcText);
+          alert("コピーしました");
+        }}
+        title="クリップボードにコピー"
+      >
+        <svg
+          class="icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          ><rect
+            x="9"
+            y="9"
+            width="13"
+            height="13"
+            rx="2"
+            ry="2"
+          /><path
+            d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
+          /></svg
+        >
+      </button>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -282,6 +319,14 @@
     background: transparent;
     color: #fff;
   }
+  /* テキストエリア + フローティングボタンの重ね合わせ領域 */
+  .lrcEditorBody {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
   .ttTextEditor {
     flex: 1;
     background: #0a0a0a;
@@ -293,6 +338,36 @@
     padding: 16px;
     line-height: 1.6;
     outline: none;
+  }
+  /* Repl Editor と同じ右下フローティングボタン */
+  .floatButtons {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    gap: 8px;
+  }
+  .floatBtn {
+    position: relative;
+    padding: 10px;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  }
+  .floatBtn :global(.icon) {
+    width: 18px;
+    height: 18px;
+  }
+  .copyBtn {
+    background: #0070f3;
+  }
+  .copyBtn:hover {
+    background: #0051a2;
   }
   /* 「マッチ移動」で setSelectionRange されたテキストを青で強調 */
   .ttTextEditor::selection {

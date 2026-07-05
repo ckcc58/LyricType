@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { readFileSync } from 'fs';
+import { assertPipesValid } from './master-repl-validate';
 
 const url = process.env.PUBLIC_SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -43,14 +44,25 @@ if (dups.length > 0) {
 	if (dups.length > 10) console.warn(`  ...他 ${dups.length - 10}件`);
 }
 
+// 同一キーの重複を除去（後勝ち）。Postgres の upsert は同一コマンド内に
+// 重複キーがあると "ON CONFLICT DO UPDATE command cannot affect row a second time"
+// で失敗するため、チャンク化の前に必ず一意化する。
+const dedupedRows = Array.from(new Map(rows.map((r) => [r.key, r])).values());
+if (dedupedRows.length !== rows.length) {
+	console.log(`重複除去: ${rows.length} -> ${dedupedRows.length} 件`);
+}
+
+// パイプ分け精査: 不整合があればここで投入を中止する
+assertPipesValid(dedupedRows, 'static/master-repl.txt');
+
 const CHUNK = 1000;
-for (let i = 0; i < rows.length; i += CHUNK) {
-	const chunk = rows.slice(i, i + CHUNK);
+for (let i = 0; i < dedupedRows.length; i += CHUNK) {
+	const chunk = dedupedRows.slice(i, i + CHUNK);
 	const { error } = await supabase.from('master_repl').upsert(chunk, { onConflict: 'key' });
 	if (error) {
 		console.error(`Batch ${i} 失敗:`, error);
 		process.exit(1);
 	}
-	console.log(`Upserted ${i + chunk.length} / ${rows.length}`);
+	console.log(`Upserted ${i + chunk.length} / ${dedupedRows.length}`);
 }
 console.log('完了');

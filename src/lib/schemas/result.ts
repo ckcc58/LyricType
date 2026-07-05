@@ -40,17 +40,16 @@ const phraseResultV2 = z.tuple([
 
 export const resultSubmitSchema = z.object({
 	chart_id:            z.number().int().positive(),
-	lyric_data:          z.any(),
-	chart_hash:          z.string().max(64),
+	// プレイ開始時の譜面版 (charts.updated_at ?? created_at)。版ズレ検出に使う。
+	// 旧クライアント互換のため任意 (未送信ならガードをスキップ)。
+	client_version:      z.string().max(40).optional(),
 	score:               z.number().min(0).max(10000),
-	perfect_count:       z.number().int().min(0),
-	reading_match_count: z.number().int().min(0),
-	lost_count:          z.number().int().min(0),
 	typing_speed:        z.number().min(0).max(2000),
-	total_phrases:       z.number().int().min(0),
 	key_events:     z.array(keyEventV2).max(5000),
 	commit_events:  z.array(commitEventV2).max(10000),
 	phrase_results: z.array(phraseResultV2).max(500),
 });
+// 注: lyric_data / chart_hash はクライアントから受け取らない (サーバが charts.chart_data
+// から信頼できるスナップショットを組む)。旧クライアントが送っても zod が余剰キーとして破棄する。
 
 export type ResultSubmitInput = z.infer<typeof resultSubmitSchema>;

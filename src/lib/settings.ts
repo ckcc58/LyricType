@@ -1,15 +1,18 @@
 import { writable, type Writable } from "svelte/store";
+import { DEFAULT_FONT_ID, isValidFontId } from "./fonts";
 
 export const SETTINGS_STORAGE_KEY = "lyrictype-settings";
 
 export type Settings = {
   volume: number;
   timeOffset: number;
+  fontFamily: string;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
   volume: 70,
   timeOffset: 0,
+  fontFamily: DEFAULT_FONT_ID,
 };
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
@@ -25,6 +28,7 @@ export function normalizeSettings(value: unknown): Settings {
     timeOffset: typeof input.timeOffset === "number" && Number.isFinite(input.timeOffset)
       ? input.timeOffset
       : DEFAULT_SETTINGS.timeOffset,
+    fontFamily: isValidFontId(input.fontFamily) ? input.fontFamily : DEFAULT_SETTINGS.fontFamily,
   };
 }
 

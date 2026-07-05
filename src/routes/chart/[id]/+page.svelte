@@ -19,8 +19,10 @@
     // 譜面本体は SSR HTML から外して、クライアントから別 API で取得する。
     // queryKey に updated_at を含めるので、譜面が更新されたら自動的に別キー扱いとなり再取得される。
     // ?v= 付き URL はサーバー側で immutable キャッシュされる(更新で URL ごと変わる)。
-    const chartVersion = data.chart.updated_at ?? data.chart.created_at;
-    const chartDataUrl = `/api/chart/${data.chart.id}/data?v=${encodeURIComponent(chartVersion)}`;
+    // ※ chart/[id] は同一ルート遷移でコンポーネントが再利用される(onMount は再実行されない)ため、
+    //   const で固定すると譜面切替後も前の URL を fetch してしまう。$derived で data に追従させる。
+    const chartVersion = $derived(data.chart.updated_at ?? data.chart.created_at);
+    const chartDataUrl = $derived(`/api/chart/${data.chart.id}/data?v=${encodeURIComponent(chartVersion)}`);
     const chartDataQuery = createQuery<{ chart_data: ChartDataJSON; version: string }>(() => ({
         queryKey: ['chart-data', data.chart.id, chartVersion],
         queryFn: async () => {
@@ -141,13 +143,6 @@
 
     let overlayRef: GameOverlay;
 
-    function hashLyric(lyric: unknown): string {
-        const s = JSON.stringify(lyric);
-        let h = 5381;
-        for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
-        return (h >>> 0).toString(16);
-    }
-
     async function submitScore() {
         if (scoreSubmitStatus !== 'idle') return;
         if (currentReplay) return; // リプレイモードでは送信しない
@@ -156,25 +151,16 @@
 
         scoreSubmitStatus = 'sending';
         try {
-            // chart.lyric の matchRegExp は JSON シリアライズで失われるため、source を明示的に保存する
-            const sourceLyric = ChartGame.chart?.lyric ?? [];
-            const lyric = sourceLyric.map((item) => ({
-                ...item,
-                matchRegExpSource: item.matchRegExp?.source ?? '',
-            }));
+            // lyric_data / chart_hash はサーバが charts.chart_data から組むため送らない。
+            // 代わりにプレイ開始時の版 (updated_at) を送り、版ズレ検出に使う。
             const res = await fetch('/api/result', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     chart_id:            data.chart.id,
-                    lyric_data:          lyric,
-                    chart_hash:          hashLyric(lyric),
+                    client_version:      String(data.chart.updated_at ?? data.chart.created_at ?? ''),
                     score:               $score,
-                    perfect_count:       $perfectCount,
-                    reading_match_count: $readingMatchCount,
-                    lost_count:          $lostCount,
                     typing_speed:        $typingSpeed,
-                    total_phrases:       $totalPhrases,
                     ...ChartGame.serializeReplayForSubmit(),
                 })
             });
@@ -198,6 +184,11 @@
         scoreSubmitStatus = 'idle';
         scoreSubmitError = '';
         overlayRef?.resetTab();
+        if (currentReplay) {
+            // リプレイからの Retry は画面遷移なしで同じリプレイを 0 秒から再生し直す
+            await ChartGame.restartReplay();
+            return;
+        }
         await ChartGame.retry();
     }
 
@@ -233,6 +224,18 @@
         return youtubeApiPromise;
     }
 
+    // 譜面切替(同一ルート遷移)時に前の譜面の残留状態をリセットする。
+    // コンポーネントが再利用され onMount が再実行されないため、明示的にクリアが必要。
+    let lastResetId: number | null = null;
+    $effect(() => {
+        const id = data.chart.id;
+        if (lastResetId === id) return;
+        lastResetId = id;
+        currentReplay = null;
+        scoreSubmitStatus = 'idle';
+        scoreSubmitError = '';
+    });
+
     // chart_data が届いた時 + リプレイ切替時に ChartGame を初期化/再初期化
     $effect(() => {
         const d = chartDataQuery.data;
@@ -241,6 +244,10 @@
         if (initKey === lastInitKey) return;
         lastInitKey = initKey;
         const isReplay = !!currentReplay;
+        // 統計: ライブプレイのみ記録（リプレイ再生は記録しない）
+        ChartGame.statsContext = isReplay
+            ? null
+            : { chartId: data.chart.id, source: 'chart' };
         // 既存セッションを破棄してから再ロード
         ChartGame.stop();
         ChartGame.init();
@@ -367,7 +374,10 @@
             }
         } else if (e.key === 'F4' && (phase === 'playing' || phase === 'grace' || phase === 'result')) {
             e.preventDefault();
+            const wasReplay = !!currentReplay;
             await retryGame();
+            // リプレイからの F4 は restartReplay 済みなので通常プレイ用の start() は呼ばない
+            if (wasReplay) return;
             ChartGame.start();
             await tick();
             document.getElementById('text-input')?.focus();
@@ -418,7 +428,15 @@
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseleave', onMouseLeave);
 
+        // 統計: タブ離脱/リロード時に進行中プレイを beacon で送る
+        const onPageHide = () => ChartGame.flushPlayStats({ viaBeacon: true });
+        window.addEventListener('pagehide', onPageHide);
+
         return () => {
+            // SPA 遷移で離脱する場合は進行中プレイをフラッシュしてから破棄
+            ChartGame.flushPlayStats();
+            ChartGame.statsContext = null;
+            window.removeEventListener('pagehide', onPageHide);
             ChartGame.stop();
             ChartGame.init();
             document.removeEventListener('keydown', handleStartKey);
@@ -582,26 +600,21 @@
                             {#if c.youtube_video_id}
                                 <img
                                     class="other-chart-thumb"
-                                    src="https://i.ytimg.com/vi/{c.youtube_video_id}/default.jpg"
+                                    src="https://i.ytimg.com/vi/{c.youtube_video_id}/mqdefault.jpg"
                                     alt=""
                                     loading="lazy"
                                     decoding="async"
-                                    width="120"
-                                    height="90"
+                                    width="320"
+                                    height="180"
                                 />
                             {:else}
                                 <div class="other-chart-thumb other-chart-thumb-placeholder"></div>
                             {/if}
                             <div class="other-chart-text">
                                 <div class="other-chart-title">{c.title}</div>
-                                {#if c.artist}
-                                    <div class="other-chart-artist">{c.artist}</div>
-                                {/if}
-                                <div class="other-chart-meta">
-                                    <span>中央値 {c.median_cpm ?? '--'} CPM</span>
-                                    <span class="other-chart-meta-sep">·</span>
-                                    <span>最高 {c.peak_cpm ?? '--'} CPM</span>
-                                </div>
+                                <div class="other-chart-artist">{c.artist ?? ''}</div>
+                                <div class="other-chart-line">中央値 {c.median_cpm ?? '--'} CPM</div>
+                                <div class="other-chart-line">最高 {c.peak_cpm ?? '--'} CPM</div>
                             </div>
                         </a>
                     </li>
@@ -614,15 +627,13 @@
 </div>
 
 <style>
-    :global(body) {
-        background-color: #000;
-    }
-
     #game {
         display: flex;
         flex-direction: column;
         align-items: center;
-        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        min-height: 100%;
+        box-sizing: border-box;
+        background-color: var(--bg-game);
     }
 
     #control {
@@ -785,7 +796,6 @@
         gap: 32px;
         background: linear-gradient(to bottom, #111 0%, #0a0a0a 100%);
         border-top: 1px solid rgba(255, 255, 255, 0.06);
-        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
         transition: transform 0.3s ease, opacity 0.3s ease;
     }
 
@@ -997,64 +1007,73 @@
         gap: 6px;
     }
     .other-chart-row {
-        display: flex;
-        gap: 10px;
-        padding: 8px;
+        position: relative;
+        display: block;
+        overflow: hidden;
+        padding: 10px 12px;
         border-radius: 6px;
         text-decoration: none;
         color: inherit;
-        background: rgba(255, 255, 255, 0.02);
-        border: 1px solid rgba(255, 255, 255, 0.05);
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.06);
         transition: background-color 0.12s ease, border-color 0.12s ease;
     }
     .other-chart-row:hover {
-        background: rgba(255, 255, 255, 0.05);
-        border-color: rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        border-color: rgba(255, 255, 255, 0.14);
     }
+    /* サムネ: テキストの背後に 16:9 で透過表示。右端から左へフェードさせて文字を読みやすく保つ */
     .other-chart-thumb {
-        flex: 0 0 auto;
-        width: 80px;
+        position: absolute;
+        top: 0;
+        right: 0;
+        height: 100%;
         aspect-ratio: 16 / 9;
         object-fit: cover;
-        border-radius: 4px;
-        background: #0e0f12;
-        display: block;
+        opacity: 0.32;
+        pointer-events: none;
+        z-index: 0;
+        -webkit-mask-image: linear-gradient(to left, #000 35%, transparent 95%);
+        mask-image: linear-gradient(to left, #000 35%, transparent 95%);
     }
     .other-chart-thumb-placeholder {
         background: linear-gradient(135deg, #2a2a30, #1a1a20);
     }
+    /* 文字列は左上から4行 (タイトル / アーティスト / 中央値 / 最高)。
+       行間ではなくサイズの階層と小さなグループ間隔で見やすさを出す。 */
     .other-chart-text {
-        flex: 1 1 auto;
-        min-width: 0;
+        position: relative;
+        z-index: 1;
         display: flex;
         flex-direction: column;
-        gap: 2px;
-        justify-content: center;
+        line-height: 1.3;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
     }
     .other-chart-title {
-        color: #ddd;
-        font-size: 0.85rem;
-        font-weight: 600;
+        color: #f2f2f2;
+        font-size: 0.92rem;
+        font-weight: 700;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
     .other-chart-artist {
-        color: #888;
+        color: #c8c8c8;
         font-size: 0.72rem;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        min-height: 1em; /* artist が空でも4行のレイアウトを保つ */
+        /* 名前ブロックと CPM ブロックを視覚的に分ける */
+        margin-bottom: 5px;
     }
-    .other-chart-meta {
-        color: #666;
-        font-size: 0.68rem;
+    .other-chart-line {
+        color: #c2c2c2;
+        font-size: 0.72rem;
         font-variant-numeric: tabular-nums;
-        margin-top: 2px;
-    }
-    .other-chart-meta-sep {
-        margin: 0 4px;
-        color: #444;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
 </style>

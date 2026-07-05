@@ -28,12 +28,15 @@
     downloadLrc: () => void;
     /** 指定秒へシーク (ダブルクリックでジャンプ) */
     playerSeek: (time: number) => void;
+    /** 個別ファイルインポート (親の隠し input を開く) */
+    openImport: (kind: "lrc" | "audio" | "repl") => void;
     /** スクロール用 DOM ref を親に export (handleTtKeydown の scrollCursorToCenter で使う) */
     editorAreaEl?: HTMLElement | null;
   };
   let {
     downloadLrc,
     playerSeek,
+    openImport,
     editorAreaEl = $bindable<HTMLElement | null>(null),
   }: Props = $props();
 
@@ -105,8 +108,24 @@
 </script>
 
 {#if !player.videoSrc && !player.imageSrc && !player.ytVideoId && !player.audioSrc}
-  <div class="ttContainer ttEmptyContainer">
-    <div class="ttEmpty"></div>
+  <div class="ttContainer">
+    <!-- 未読み込みでもヘッダー (エクスポート/インポート) は表示する -->
+    <div class="ttToolbar">
+      <div class="ttControls">
+        <button class="ttBtn ttExportBtn" onclick={downloadLrc}>
+          LRCエクスポート
+        </button>
+        <button class="ttBtn ttImportBtn" onclick={() => openImport("lrc")}>
+          LRCインポート
+        </button>
+        <button class="ttBtn ttImportBtn" onclick={() => openImport("audio")}>
+          音声インポート
+        </button>
+      </div>
+    </div>
+    <div class="ttEmptyContainer">
+      <div class="ttEmpty"></div>
+    </div>
   </div>
 {:else}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -116,6 +135,12 @@
       <div class="ttControls">
         <button class="ttBtn ttExportBtn" onclick={downloadLrc}>
           LRCエクスポート
+        </button>
+        <button class="ttBtn ttImportBtn" onclick={() => openImport("lrc")}>
+          LRCインポート
+        </button>
+        <button class="ttBtn ttImportBtn" onclick={() => openImport("audio")}>
+          音声インポート
         </button>
         <span class="ttInfo"
           >[{ttIsOnEndCheck()
@@ -539,6 +564,8 @@
     outline: none;
   }
   .ttEmptyContainer {
+    flex: 1;
+    display: flex;
     align-items: center;
     justify-content: center;
     background: #111;

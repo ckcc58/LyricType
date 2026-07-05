@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createInfiniteQuery } from "@tanstack/svelte-query";
+  import { chartThumbnailUrl, chartGradient } from "$lib/chart-thumbnail";
 
   let { data } = $props();
 
@@ -130,21 +131,6 @@
     (query.data?.pages ?? []).flatMap((p) => p.charts),
   );
 
-  // 譜面 id から決定論的にグラデーション色を選ぶ（YouTubeサムネが無い時のフォールバック）。
-  const GRADIENTS: [string, string][] = [
-    ["#3b3270", "#1f3b6b"],
-    ["#5a2a6e", "#7c2a4d"],
-    ["#7a2440", "#5a1530"],
-    ["#1a3b5c", "#2a5a7a"],
-    ["#4a2a6e", "#2a3b7a"],
-    ["#6e2a55", "#3a1a4a"],
-    ["#2a4a6e", "#5a3a7a"],
-    ["#5c2a3a", "#3a1a2a"],
-  ];
-  function gradientFor(id: number): string {
-    const [c1, c2] = GRADIENTS[Math.abs(id) % GRADIENTS.length];
-    return `linear-gradient(135deg, ${c1} 0%, ${c2} 100%)`;
-  }
 </script>
 
 <div class="home">
@@ -159,7 +145,7 @@
           {#if chart.youtube_video_id}
             <img
               class="chart-thumb"
-              src="https://i.ytimg.com/vi/{chart.youtube_video_id}/mqdefault.jpg"
+              src={chartThumbnailUrl(chart.youtube_video_id)}
               alt=""
               loading="lazy"
               decoding="async"
@@ -169,7 +155,7 @@
           {:else}
             <div
               class="chart-thumb chart-thumb-fallback"
-              style:background-image={gradientFor(chart.id)}
+              style:background-image={chartGradient(chart.id)}
             ></div>
           {/if}
         </div>
@@ -261,14 +247,14 @@
 
 <style>
   .home {
-    padding: 24px;
-    max-width: 1080px;
-    margin: 0 auto;
+    /* 背景は全幅に敷き、中身だけ padding で 1080px 相当に中央寄せする
+       (max-width だと広い画面で左右に body の地色が露出する) */
+    padding: 24px max(24px, calc((100% - 1032px) / 2));
     height: 100vh;
     overflow-y: auto;
     box-sizing: border-box;
-    background: #15161a;
-    color: #d8d8da;
+    background: var(--bg-page);
+    color: var(--text-primary);
   }
 
   .header {

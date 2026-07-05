@@ -102,7 +102,8 @@ function extractPhrasesWithKuromoji(
       const nextPos = pos + 1;
       const nextChar = text[nextPos];
       if (nextChar) {
-        const isHiraKata = /^[ぁ-んァ-ン]$/.test(nextChar);
+        // ァ-ヶ で ヴヵヶ まで含める（旧 ァ-ン は ヴヵヶ を取りこぼしていた）
+        const isHiraKata = /^[ぁ-んァ-ヶ]$/.test(nextChar);
         const isKanjiToken =
           /^[一-鿿々〆]$/.test(nextChar) && singleTokenPositions.has(nextPos);
         if (isHiraKata || isKanjiToken) {
@@ -121,7 +122,8 @@ function extractPhrasesWithKuromoji(
 
 function extractPhrasesFallback(text: string, missingChars: Set<string>): string[] {
   const result = new Set<string>();
-  const phraseRegExp = /[一-鿿々〆ぁ-んァ-ンー]+/g;
+  // ァ-ヶ で ヴヵヶ まで含める（旧 ァ-ン は ヴヵヶ を取りこぼしていた）
+  const phraseRegExp = /[一-鿿々〆ぁ-んァ-ヶー]+/g;
   for (const match of text.matchAll(phraseRegExp)) {
     const phrase = match[0];
     if ([...phrase].some((c) => missingChars.has(c))) {

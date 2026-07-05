@@ -20,6 +20,8 @@ Thumbs.db
 
 # Local AI tool settings
 .claude/
+CLAUDE.md
+DESIGN.md
 
 # Vite
 vite.config.js.timestamp-*

@@ -17,6 +17,7 @@
 
 // encoding-japanese はファイル読み込み時のみ必要なので動的importする（バンドルサイズ削減）
 import { ReplParser } from "./repl-parser";
+import { hasTypeable, stripUntypeable } from "./char-class";
 
 
 export type MediaSource = {
@@ -147,7 +148,7 @@ export function parseLyric(lrc: string, replTxt: string) {
         // 直前フレーズの末尾に取り込んで 1 フレーズとして扱う。
         const isAllNonTypable = (s: string) => {
             const stripped = s.replace(/\[\d\d:\d\d:\d\d\]/g, "");
-            return stripped !== "" && !/[0-9０-９a-zA-Zａ-ｚＡ-Ｚぁ-んァ-ヶー々〆一-鿿～〜]/.test(stripped);
+            return stripped !== "" && !hasTypeable(stripped);
         };
         const clauses: string[] = [];
         for (const c of rawClauses) {
@@ -226,6 +227,20 @@ export function parseLyric(lrc: string, replTxt: string) {
                 if (curCount > 0) charGroups.push({ count: curCount, startTime: curTime });
             }
 
+            // 末尾スペースをプログレスバー（火花）の対象から除外する。
+            // スペースは発音していないためバーが伸びると違和感がある。また count に
+            // 含めると、その分だけバー先端が可視文字の末尾で止まる前に「時間」を消費し、
+            // スペース比率の高い短いフレーズほど火花が早く終わる原因になる。
+            // 末尾スペースは常に最後のグループに属するので、そのcountから引く。
+            {
+                const trailingWs = clause.length - clause.replace(/[\s　]+$/, "").length;
+                if (trailingWs > 0 && charGroups.length > 0) {
+                    const last = charGroups[charGroups.length - 1];
+                    last.count -= trailingWs;
+                    if (last.count <= 0) charGroups.pop();
+                }
+            }
+
             const result = [startTime, clause, endTime, charGroups] as [number, string, number | undefined, { count: number; startTime: number; endTime?: number }[]];
             // 次のフレーズが先頭連続タグでendTimeを設定できるようにする
             prevEndTimeSetter = (t: number) => { result[2] = result[2] ?? t; };
@@ -258,14 +273,12 @@ export function parseLyric(lrc: string, replTxt: string) {
             let endTime = phraseData[2];
             let charGroups = phraseData[3];
 
-            const unTypeReg = /[^0-9０-９a-zA-Zａ-ｚＡ-Ｚぁ-んァ-ヶー々〆一-鿿～〜]/g;
-
             let segments: { text: string; reading: string; normalizedText: string; normalizedReading: string; explicit: boolean; }[] = [];
             const parts = phrase.split(/(<ruby>[\s\S]*?<\/ruby>)/g);
 
             const buildSegment = (text: string, reading: string, explicit = false) => {
-                const normalizedText = text.replace(unTypeReg, "");
-                let tempReading = reading.replace(unTypeReg, "");
+                const normalizedText = stripUntypeable(text);
+                let tempReading = stripUntypeable(reading);
                 tempReading = tempReading.replace(/[\u30a1-\u30f6]/g, match => String.fromCharCode(match.charCodeAt(0) - 0x60));
                 // \uff5e \u306f\u8aad\u307f\u3067\u306f \u30fc\uff08\u9577\u97f3\uff09\u3068\u3057\u3066\u6253\u3066\u308b\u3088\u3046\u6b63\u898f\u5316\uff08\u30bf\u30a4\u30d7\u6642\u306f \uff5e \u3067 text \u30de\u30c3\u30c1\u3001\u30fc \u3067 reading \u30de\u30c3\u30c1\uff09
                 tempReading = tempReading.replace(/[\uff5e\u301c]/g, "\u30fc");

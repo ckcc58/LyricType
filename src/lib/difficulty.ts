@@ -105,6 +105,8 @@ export function calcDifficulty(lyric: ChartDataJSON['lyric']): DifficultyResult 
 		.sort((a, b) => a.start - b.start);
 
 	// === Step G: 連続英語フレーズ統合（同じ行内のみ）===
+	// char-class の共有集合とは別物（意図的）。「日本語を1文字も含まない=英語のみ」判定。
+	// ヵヶ は ァ-ヶ に含まれ冗長だが無害。
 	const isEnglishOnly = (text: string): boolean =>
 		!/[ぁ-んァ-ヶー一-鿿々〆ヵヶ]/.test(text);
 	const MERGE_THRESHOLD = 1;

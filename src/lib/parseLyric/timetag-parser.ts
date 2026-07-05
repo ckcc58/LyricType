@@ -14,6 +14,8 @@
 
 import { timeTagToTime } from "./parse-chart";
 import { ReplParser, R_START, R_END, R_SPAN } from "./repl-parser";
+import { MoraParser, SMALL_KANA, SOKUON } from "./mora-parser";
+import { stripNonKana } from "./char-class";
 
 // ============================================================
 // 型定義
@@ -37,41 +39,13 @@ export type TimeTagLine = {
 };
 
 // ============================================================
-// MoraParser
-// ============================================================
-
-const SMALL_KANA = /^[ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ]$/;
-const SOKUON = /^[っッ]$/;
-
-export class MoraParser {
-  static parse(reading: string): string[] {
-    const moras: string[] = [];
-    const chars = [...reading];
-
-    for (let i = 0; i < chars.length; i++) {
-      const ch = chars[i];
-      if (SMALL_KANA.test(ch) && moras.length > 0) {
-        moras[moras.length - 1] += ch;
-      } else if (SOKUON.test(ch) && moras.length > 0) {
-        moras[moras.length - 1] += ch;
-      } else {
-        moras.push(ch);
-      }
-    }
-
-    return moras;
-  }
-
-  static count(reading: string): number {
-    return MoraParser.parse(reading).length;
-  }
-}
-
-// ============================================================
 // ヘルパー関数
 // ============================================================
 
-/** この文字にチェック（タイムタグ打ち対象）を付けるべきか */
+/** この文字にチェック（タイムタグ打ち対象）を付けるべきか
+ *  ※ char-class の共有集合とは別物（意図的）。長音符ー は単独でチェックを付けず
+ *     前モーラに結合する設計のため、ここでは ー を含めない。
+ *     （ヵヶ は ァ-ヶ に既に含まれるため冗長だが無害） */
 function isCheckable(ch: string): boolean {
   return /^[ぁ-んァ-ヶ々〆ヵヶ一-鿿]$/.test(ch);
 }
@@ -80,8 +54,9 @@ function isSpace(ch: string): boolean {
   return /^[\s　]$/.test(ch);
 }
 
+/** 日本語文字か（isCheckable と違い長音符ー も含む）。
+ *  ※ char-class の共有集合とは別物（意図的）。ヵヶ は ァ-ヶ に含まれ冗長だが無害。 */
 function isJapanese(c: string): boolean {
-  //伸ばし棒が入ってる
   return /[ぁ-んァ-ヶー々〆ヵヶ一-鿿]/.test(c);
 }
 
@@ -267,8 +242,7 @@ export function buildTimeTagData(
           } else {
             // 読みあり
             reading = rubyReading;
-            const cleanReading =
-              rubyReading.replace(/[^ぁ-んァ-ヶー]/g, "") || rubyReading;
+            const cleanReading = stripNonKana(rubyReading) || rubyReading;
             checkCount = MoraParser.count(cleanReading);
           }
         } else if (!isCheckable(ch)) {
@@ -350,13 +324,12 @@ export function buildTimeTagData(
       ) {
         for (let ni = targetIdx + 1; ni < chars.length; ni++) {
           if (chars[ni].checkCount >= 1) {
-            // 借りる文字 (ni) の checkCount/times/reading を全て先頭記号へ移す
+            // 借りる文字 (ni) の checkCount/times のみを先頭記号へ移す。
+            // 読み (reading) は元の文字に残す（記号側にルビを付けない）。
             chars[targetIdx].checkCount = chars[ni].checkCount;
             chars[targetIdx].times = [...chars[ni].times];
-            chars[targetIdx].reading = chars[ni].reading;
             chars[ni].checkCount = 0;
             chars[ni].times = [];
-            chars[ni].reading = "";
             break;
           }
         }

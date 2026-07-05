@@ -5,6 +5,7 @@
 import { volume, imageURL, media } from "../store.ts";
 import { tick } from "svelte";
 import { Tick } from "./tick.ts";
+import { stripUntypeable } from "./parseLyric/char-class.ts";
 import { writable, get } from "svelte/store";
 
 export type MatchChunk = {
@@ -120,6 +121,10 @@ export class YTMediaProxy {
     return this.player.getCurrentTime();
   }
   set currentTime(t: number) {
+    // 終端より手前へのシークでは ended を即解除する。
+    // YT は onStateChange が来るまで ended が残るため、シーク直後の tick が
+    // 「まだ終了中」と誤認して偽の grace 開始 → 後で即リザルト等の原因になる。
+    if (t < this.player.getDuration()) this._ended = false;
     this.player.seekTo(t, true);
   }
   get duration() {
@@ -153,6 +158,10 @@ export class ChartGame {
   static chart: Chart;
   static stopped: boolean = false;
   static seekGuard: boolean = false; // YouTube seekTo(0) 完了まで audioTime を 0 に強制するフラグ
+  // リプレイシーク直後、メディア側の seek 完了まで audioTime を目標時刻に固定する。
+  // YouTube の seekTo は非同期で、完了前の古い currentTime を読むと再構築済みの
+  // 状態がさらに先 (シーク前の時刻) まで進んでしまい巻き戻し不能になる。
+  private static replaySeekGuard: number | null = null;
 
   // Score system (10000点満点、earnedBaseScore / maxBaseScore × 10000)
   static score = writable(0);
@@ -184,7 +193,10 @@ export class ChartGame {
   static replayMode = writable(false);
   static replayUsername = writable<string | null>(null);
   static replayFinalScore = writable<number>(0);
-  static replayKeyDisplayLog = writable<{ t_ms: number; code: string; ime: boolean; repeat: boolean }[]>([]);
+  static replayKeyDisplayLog = writable<{ t_ms: number; code: string; ime: boolean; repeat: boolean; shift: boolean; ctrl: boolean }[]>([]);
+  // フレーズ確定後〜次のフレーズ打ち始めまで、確定済み入力を薄く表示するためのフラグ
+  static replayKeyDisplayDimmed = writable(false);
+  private static replayKeyDisplayPendingClear = false;
   static disallowInputWhenPaused = false;
   static disallowRewind = false;
   private static replayKeyEvents: { t_ms: number; code: string; shift: boolean; ctrl: boolean; alt: boolean; meta: boolean; ime: boolean; repeat?: boolean }[] = [];
@@ -197,6 +209,14 @@ export class ChartGame {
 
   // O(1) フレーズインデックス参照
   static lyricIndexMap = new Map<Chart["lyric"][number], number>();
+
+  // --- 統計計装 ---
+  // ページが start() 前にセットする。null の間は記録しない（リプレイ等）。
+  static statsContext: { chartId: number | null; source: "chart" | "local" } | null = null;
+  // 現在のプレイが進行中か（プレイ終了時フラッシュの二重実行を防ぐ）
+  private static playActive = false;
+  // 現在のプレイで lost したフレーズ index（chart.lyric の添字）
+  static lostPhraseIndices: number[] = [];
 
   // Chart title for result display
   static chartTitle = writable("");
@@ -271,6 +291,8 @@ export class ChartGame {
   private static getReplayTimeMs(): number {
     if (this.virtualMode) return this.virtualReplayTimeMs;
     if (!this.audio) return 0;
+    // シーク完了待ちの間は目標時刻で固定 (詳細は replaySeekGuard 定義コメント)
+    if (this.replaySeekGuard !== null) return Math.round(this.replaySeekGuard * 1000);
     const audioMs = Math.round(this.audio.currentTime * 1000);
     if (this.audio.ended && this.graceStartTime > 0) {
       const graceMs = Math.round(performance.now() - this.graceStartTime);
@@ -378,10 +400,13 @@ export class ChartGame {
     this.totalPhrases.set(0);
     this.typingSpeed.set(0);
     this.keyCounts.set({});
+    this.lostPhraseIndices = [];
     this.keyEventLog = [];
     this.commitEventLog = [];
     this.phraseResultLog = [];
     this.replayKeyDisplayLog.set([]);
+    this.replayKeyDisplayDimmed.set(false);
+    this.replayKeyDisplayPendingClear = false;
     this.replayKeyEventCursor = 0;
     this.replayCommitEventCursor = 0;
     this.replayPhraseResultCursor = 0;
@@ -389,6 +414,7 @@ export class ChartGame {
     this.inputEnabled.set(false);
     this.graceProgress.set(0);
     this.graceStartTime = 0;
+    this.replaySeekGuard = null;
     this.renderedLyrics.set([]);
     this.nextLines.set([]);
   }
@@ -506,6 +532,10 @@ export class ChartGame {
 
     // 既に playing 状態なら二重起動を防ぐ (tick ループが多重生成されないように)
     if (get(this.gamePhase) === "playing") return;
+
+    // 統計: ここから1プレイ開始。load()→init() で keyCounts / lostPhraseIndices は
+    // 既にリセット済みなので、進行中フラグを立てるだけ。
+    this.playActive = true;
 
     this.gamePhase.set("playing");
     await tick();
@@ -626,8 +656,10 @@ export class ChartGame {
   };
 
   private static inputEndsWithJapaneseTypable(value: string): boolean {
-    const typed = value.replace(/[^0-9０-９a-zA-Zａ-ｚＡ-Ｚぁ-んァ-ヶー々〆一-鿿～〜]/g, "");
+    const typed = stripUntypeable(value);
     const last = Array.from(typed).at(-1) ?? "";
+    // char-class の共有集合とは別物（意図的）。IME 確定待ち判定用に英数を除外し、
+    // 「日本語の打鍵文字（かな/漢字/々〆/～〜）で終わるか」だけを見る。
     return /[ぁ-んァ-ヶー々〆一-鿿～〜]/.test(last);
   }
 
@@ -785,12 +817,14 @@ export class ChartGame {
   }
 
   // 共通マッチング検索: 未クリア歌詞リストから入力に最もマッチするアイテムを見つける
-  // 優先度: 完全一致 > マッチ文字数
+  // 優先度（プレビュー・採点で共通の単一ポリシー）:
+  //   1. マッチ文字数が多い   （タイプ中の意図した行を選ぶ）
+  //   2. 同数なら完全一致を優先（ちょうど完成した行を確定側で拾う）
+  //   3. それでも同じなら先に見つけた方（安定・決定的）
   static findBestMatch(
     lrcItems: Chart["lyric"][number][],
     input: string,
     clearedStatus: Map<Chart["lyric"][number], MatchChunk[][]>,
-    preferFullMatch: boolean,
   ): {
     index: number;
     matchedLen: number;
@@ -862,11 +896,10 @@ export class ChartGame {
         };
 
         const isBetter = (prev: MatchCandidate): boolean => {
-          if (preferFullMatch) {
-            if (isFullyMatched && !prev.isFullyMatched) return true;
-            if (!isFullyMatched && prev.isFullyMatched) return false;
-          }
-          return totalMatchedLen > prev.matchedLen;
+          if (totalMatchedLen !== prev.matchedLen)
+            return totalMatchedLen > prev.matchedLen;
+          if (isFullyMatched !== prev.isFullyMatched) return isFullyMatched;
+          return false;
         };
 
         if (!best || isBetter(best)) best = candidate;
@@ -877,9 +910,110 @@ export class ChartGame {
     return best;
   }
 
+  // 入力を未クリア歌詞へ割り当てるシミュレーション（副作用なし）。
+  // checkInput（プレビュー）と handleInput（採点）はどちらもこの結果を使う。
+  // 進捗は実状態のクローン上で消費するため、複数フレーズ消費の挙動も両者で完全一致する。
+  private static resolveInput(inputStr: string): {
+    steps: {
+      item: Chart["lyric"][number];
+      addedSegments: MatchChunk[][]; // 既存進捗に対して今回追加されたチャンク（プレビュー用）
+      mergedSegments: MatchChunk[][]; // 既存 + 追加をマージした累積状態（採点・確定用）
+      isFullyCleared: boolean;
+      isPerfect: boolean; // merged が全て text か（perfect 判定）
+      addedAllText: boolean; // 追加分が full かつ全て text か（自動確定判定用）
+    }[];
+    hasAnyMatch: boolean;
+    leftover: string;
+  } {
+    const status = this.lrcStatus;
+    if (!status) return { steps: [], hasAnyMatch: false, leftover: inputStr };
+
+    // 実状態を書き換えないよう進捗をクローン
+    const workingUnClear = [...status.unClearLrcs];
+    const workingCleared = new Map(
+      [...status.clearedStatus].map(([k, v]) => [
+        k,
+        v.map((seg) => seg.map((ch) => ({ ...ch }))),
+      ]),
+    );
+
+    const steps: {
+      item: Chart["lyric"][number];
+      addedSegments: MatchChunk[][];
+      mergedSegments: MatchChunk[][];
+      isFullyCleared: boolean;
+      isPerfect: boolean;
+      addedAllText: boolean;
+    }[] = [];
+    let currentInput = inputStr;
+    let hasAnyMatch = false;
+    const loopLimit = 100;
+
+    for (
+      let attempts = 0;
+      attempts < loopLimit && currentInput.length > 0;
+      attempts++
+    ) {
+      const bestMatch = this.findBestMatch(
+        workingUnClear,
+        currentInput,
+        workingCleared,
+      );
+      if (!bestMatch) break;
+
+      hasAnyMatch = true;
+      const item = workingUnClear[bestMatch.index];
+      const added = bestMatch.segments;
+      const existingProgress = workingCleared.get(item) || [];
+      const segCount = item.segments.length;
+
+      const merged: MatchChunk[][] = new Array(segCount)
+        .fill(null)
+        .map((_, idx) =>
+          mergeChunks([
+            ...(existingProgress[idx] || []),
+            ...(added[idx] || []),
+          ]),
+        );
+
+      const isFullyCleared = item.segments.every((seg, idx) => {
+        const len = merged[idx].reduce((a, c) => a + c.len, 0);
+        return (
+          len === seg.normalizedText.length ||
+          len === seg.normalizedReading.length
+        );
+      });
+      const isPerfect = merged.every((chunks) =>
+        chunks.every((c) => c.status === "text"),
+      );
+      const addedAllText =
+        bestMatch.isFullyMatched &&
+        added.every((chunks) => chunks.every((c) => c.status === "text"));
+
+      steps.push({
+        item,
+        addedSegments: added,
+        mergedSegments: merged,
+        isFullyCleared,
+        isPerfect,
+        addedAllText,
+      });
+
+      // クローンを更新（次イテレーションが最新進捗を見る）
+      workingCleared.set(item, merged);
+      if (isFullyCleared) {
+        const i = workingUnClear.indexOf(item);
+        if (i !== -1) workingUnClear.splice(i, 1);
+      }
+
+      currentInput = currentInput.slice(bestMatch.matchedLen);
+    }
+
+    return { steps, hasAnyMatch, leftover: currentInput };
+  }
+
   static checkInput(inputVal: string): boolean {
-    const unTypeReg = /[^0-9０-９a-zA-Zａ-ｚＡ-Ｚぁ-んァ-ヶー々〆一-鿿～〜]/g;
-    const inputStr = inputVal.replace(unTypeReg, "");
+    const inputStr = stripUntypeable(inputVal);
 
     if (!this.lrcStatus) return false;
     const status = this.lrcStatus;
@@ -906,44 +1040,13 @@ export class ChartGame {
       return false;
     }
 
-    let currentInput = inputStr;
-    const loopLimit = 100;
-    let tempUnClearLrcs = [...status.unClearLrcs];
+    // 採点（handleInput）と同じ resolveInput で解決し、確定せずプレビューだけ表示する。
+    // これにより「プレビューで光る行 = 確定したら採点される行」が定義上一致する。
+    const { steps, hasAnyMatch, leftover } = this.resolveInput(inputStr);
     let allMatchesAreTextPerfect = true;
-    let hasAnyMatch = false;
-
-    for (
-      let attempts = 0;
-      attempts < loopLimit && currentInput.length > 0;
-      attempts++
-    ) {
-      const bestMatch = this.findBestMatch(
-        tempUnClearLrcs,
-        currentInput,
-        status.clearedStatus,
-        false,
-      );
-
-      if (bestMatch) {
-        hasAnyMatch = true;
-        const item = tempUnClearLrcs[bestMatch.index];
-        status.previewMatches.set(item, bestMatch.segments);
-
-        if (bestMatch.isFullyMatched) {
-          tempUnClearLrcs.splice(bestMatch.index, 1);
-        }
-
-        const allText =
-          bestMatch.isFullyMatched &&
-          bestMatch.segments.every((chunks) =>
-            chunks.every((c) => c.status === "text"),
-          );
-        if (!allText) allMatchesAreTextPerfect = false;
-
-        currentInput = currentInput.slice(bestMatch.matchedLen);
-      } else {
-        break;
-      }
+    for (const step of steps) {
+      status.previewMatches.set(step.item, step.addedSegments);
+      if (!step.addedAllText) allMatchesAreTextPerfect = false;
     }
 
     status.needsUpdate = true;
@@ -984,7 +1087,7 @@ export class ChartGame {
     return (
       hasAnyMatch &&
       allMatchesAreTextPerfect &&
-      currentInput.length === 0 &&
+      leftover.length === 0 &&
       !this.hasLongerPrefixCandidate(inputStr)
     );
   }
@@ -1152,8 +1255,7 @@ export class ChartGame {
   }
 
   static handleInput(inputVal: string, inputEl?: HTMLInputElement) {
-    const unTypeReg = /[^0-9０-９a-zA-Zａ-ｚＡ-Ｚぁ-んァ-ヶー々〆一-鿿～〜]/g;
-    const inputStr = inputVal.replace(unTypeReg, "");
+    const inputStr = stripUntypeable(inputVal);
 
     if (!this.lrcStatus) return;
     const status = this.lrcStatus;
@@ -1162,78 +1264,45 @@ export class ChartGame {
 
     if (!inputStr) return;
 
-    let currentInput = inputStr;
+    // プレビュー（checkInput）と同じ resolveInput で解決し、その結果を確定・採点する。
+    const { steps } = this.resolveInput(inputStr);
     let anyMatch = false;
-    const loopLimit = 100;
 
-    for (
-      let attempts = 0;
-      attempts < loopLimit && currentInput.length > 0;
-      attempts++
-    ) {
-      const bestMatch = this.findBestMatch(
-        status.unClearLrcs,
-        currentInput,
-        status.clearedStatus,
-        true,
+    for (const step of steps) {
+      const t_ms = this.getReplayTimeMs();
+      const phraseIndex = this.lyricIndexMap.get(step.item) ?? -1;
+      const chunksForLog = step.mergedSegments.map((segs) =>
+        segs.map((ch) => ({ ...ch, committed: true })),
+      );
+      this.commitEventLog.push({
+        t_ms,
+        phrase_index: phraseIndex,
+        chunks: chunksForLog,
+        is_cleared: step.isFullyCleared,
+        is_perfect: step.isFullyCleared && step.isPerfect,
+      });
+
+      this.applyScoreEvent(
+        step.item,
+        step.mergedSegments,
+        step.isFullyCleared,
+        step.isPerfect,
       );
 
-      if (bestMatch) {
-        const item = status.unClearLrcs[bestMatch.index];
-        const newChunks = bestMatch.segments;
+      // applyScoreEvent でスコアが更新された後にスナップショットを取得
+      this.phraseResultLog.push({
+        t_ms,
+        phrase_index: phraseIndex,
+        chunks: step.mergedSegments.map((segs) =>
+          segs.map((ch) => ({ status: ch.status, len: ch.len })),
+        ),
+        is_cleared: step.isFullyCleared,
+        is_perfect: step.isFullyCleared && step.isPerfect,
+        score: get(this.score),
+        typing_speed: get(this.typingSpeed),
+      });
 
-        const existingProgress = status.clearedStatus.get(item) || [];
-        const segCount = item.segments.length;
-        const mergedForStatus: MatchChunk[][] = new Array(segCount)
-          .fill(null)
-          .map((_, idx) => {
-            const old = existingProgress[idx] || [];
-            const added = newChunks[idx] || [];
-            return mergeChunks([...old, ...added]);
-          });
-
-        const isFullyCleared = item.segments.every((seg, idx) => {
-          const chunks = mergedForStatus[idx];
-          const len = chunks.reduce((a, c) => a + c.len, 0);
-          return (
-            len === seg.normalizedText.length ||
-            len === seg.normalizedReading.length
-          );
-        });
-
-        const isPerfect = mergedForStatus.every((chunks) =>
-          chunks.every((c) => c.status === "text"),
-        );
-
-        const t_ms = this.getReplayTimeMs();
-        const phraseIndex = this.lyricIndexMap.get(item) ?? -1;
-        const chunksForLog = mergedForStatus.map(segs => segs.map(ch => ({ ...ch, committed: true })));
-        this.commitEventLog.push({
-          t_ms,
-          phrase_index: phraseIndex,
-          chunks: chunksForLog,
-          is_cleared: isFullyCleared,
-          is_perfect: isFullyCleared && isPerfect,
-        });
-
-        this.applyScoreEvent(item, mergedForStatus, isFullyCleared, isPerfect);
-
-        // applyScoreEvent でスコアが更新された後にスナップショットを取得
-        this.phraseResultLog.push({
-          t_ms,
-          phrase_index: phraseIndex,
-          chunks: mergedForStatus.map(segs => segs.map(ch => ({ status: ch.status, len: ch.len }))),
-          is_cleared: isFullyCleared,
-          is_perfect: isFullyCleared && isPerfect,
-          score: get(this.score),
-          typing_speed: get(this.typingSpeed),
-        });
-
-        currentInput = currentInput.slice(bestMatch.matchedLen);
-        anyMatch = true;
-      } else {
-        break;
-      }
+      anyMatch = true;
     }
 
     if (anyMatch && inputEl) {
@@ -1247,10 +1316,84 @@ export class ChartGame {
     if (!status) return;
     if (status.unClearLrcs.length > 0) {
       this.lostCount.update((n) => n + status.unClearLrcs.length);
+      // 統計: 未クリアのまま完走したフレーズを lost として記録
+      for (const item of status.unClearLrcs) {
+        const idx = this.lyricIndexMap.get(item);
+        if (idx !== undefined) this.lostPhraseIndices.push(idx);
+      }
     }
 
     this.stopped = true;
     this.gamePhase.set("result");
+
+    // 統計: 完走プレイをフラッシュ（カウンタ加算 + play_logs 記録）
+    this.flushPlayStats({ finish: true });
+  }
+
+  // 1プレイ分の統計を /api/stats/play へ送る。プレイ終了の各契機
+  // （retry / showResult / beforeunload）から呼ぶ。playActive ガードで
+  // 同一プレイの二重送信を防ぐ。リプレイ再生中・statsContext 未設定なら記録しない。
+  static flushPlayStats(
+    opts: { retry?: boolean; finish?: boolean; viaBeacon?: boolean } = {},
+  ) {
+    if (!this.playActive) return;
+    const ctx = this.statsContext;
+    // 記録対象外（リプレイ再生中 / statsContext 未設定）なら、再処理しないよう
+    // 閉じてから抜ける。判定を playActive=false より先に行うことで、設定順序が
+    // 変わってもプレイが静かに破棄されにくくする。
+    if (get(this.replayMode) || !ctx) {
+      this.playActive = false;
+      return;
+    }
+    this.playActive = false;
+
+    // keyCounts はプレイ単位（load()→init() でリセット済）。
+    // Click / CompositionEnd の疑似キーは打鍵数・キー別から除外する。
+    const kc = get(this.keyCounts);
+    const keyCounts: Record<string, number> = {};
+    let keystrokes = 0;
+    for (const [k, n] of Object.entries(kc)) {
+      if (k === "Click" || k === "CompositionEnd") continue;
+      keyCounts[k] = n;
+      keystrokes += n;
+    }
+
+    let playMs = 0;
+    try {
+      playMs = Math.max(0, Math.round(this.getCurrentTimeSec() * 1000));
+    } catch {
+      playMs = 0;
+    }
+
+    const payload = {
+      chart_id: ctx.chartId,
+      source: ctx.source,
+      retry: opts.retry ? 1 : 0,
+      finish: opts.finish ? 1 : 0,
+      keystrokes,
+      play_ms: playMs,
+      key_counts: keyCounts,
+      lost_phrases: opts.finish ? [...this.lostPhraseIndices] : [],
+      score: opts.finish ? Math.round(get(this.score)) : null,
+    };
+
+    if (
+      opts.viaBeacon &&
+      typeof navigator !== "undefined" &&
+      typeof navigator.sendBeacon === "function"
+    ) {
+      navigator.sendBeacon(
+        "/api/stats/play",
+        new Blob([JSON.stringify(payload)], { type: "application/json" }),
+      );
+    } else {
+      fetch("/api/stats/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+      }).catch(() => {});
+    }
   }
 
   static serializeReplayForSubmit() {
@@ -1337,6 +1480,8 @@ export class ChartGame {
     this.replayCommitEventCursor = 0;
     this.replayPhraseResultCursor = 0;
     this.replayKeyDisplayLog.set([]);
+    this.replayKeyDisplayDimmed.set(false);
+    this.replayKeyDisplayPendingClear = false;
   }
 
   // リプレイ中に任意時刻 (秒) へシークする。
@@ -1347,7 +1492,9 @@ export class ChartGame {
     if (this.virtualMode) return; // 連続シーク防止
 
     const duration = this.audio.duration || 0;
-    const wasPlaying = !this.audio.paused;
+    // ended 時は HTMLAudio だと paused=true になるため、「再生が終端到達で止まった」
+    // 状態も再生中として扱う (シークバック後に再開しないと固まって見える)
+    const wasPlaying = !this.audio.paused || this.audio.ended;
     this.audio.pause();
 
     // --- 状態リセット (chart / replay 系は保持) ---
@@ -1361,6 +1508,8 @@ export class ChartGame {
     this.lostCount.set(0);
     this.typingSpeed.set(0);
     this.replayKeyDisplayLog.set([]);
+    this.replayKeyDisplayDimmed.set(false);
+    this.replayKeyDisplayPendingClear = false;
     this.replayKeyEventCursor = 0;
     this.replayCommitEventCursor = 0;
     this.replayPhraseResultCursor = 0;
@@ -1399,23 +1548,53 @@ export class ChartGame {
     // --- 実オーディオに反映 ---
     if (targetSec <= duration) {
       this.audio.currentTime = targetSec;
+      this.replaySeekGuard = targetSec;
       this.graceStartTime = 0;
       this.gamePhase.set('playing');
     } else {
       this.audio.currentTime = duration;
+      this.replaySeekGuard = duration;
       const graceMs = (targetSec - duration) * 1000;
       this.graceStartTime = performance.now() - graceMs;
       this.gamePhase.set('grace');
     }
 
-    if (wasPlaying) {
+    // 終端ちょうど・grace 域では play() しない (ended 状態の media に play() すると
+    // 先頭から再生が始まってしまうため)。grace の進行は tick が performance.now() で行う。
+    if (wasPlaying && targetSec < duration) {
       try { await this.audio.play(); } catch {}
     }
   }
 
+  /** リプレイを画面遷移なしで最初から再生し直す (通常プレイの F4 リトライ相当) */
+  static async restartReplay() {
+    if (!this.chart || !this.audio) return;
+    if (!get(this.replayMode)) return;
+    // リザルト画面からの再スタートでは tick ループが止まっているため再開が必要
+    const needTick = this.stopped;
+    this.stopped = false;
+    await this.seekReplay(0);
+    try { await this.audio.play(); } catch {}
+    if (needTick) this.tick();
+  }
+
   static async retry() {
     if (!this.chart) return;
+    // 統計: リトライで破棄されるプレイをフラッシュ（retry として加算）
+    this.flushPlayStats({ retry: true });
     this.stopped = true;
+    // リプレイ再生からの retry に備えてリプレイ状態を解除する。
+    // これを怠ると replayMode が残り、次の start() で入力ハンドラが
+    // 登録されず「メディアだけ再生されて操作不能」になる。
+    document.removeEventListener('keydown', this.replayKeydownHandler);
+    if (get(this.replayMode)) {
+      this.replayMode.set(false);
+      this.replayUsername.set(null);
+      this.replayFinalScore.set(0);
+      this.replayKeyEvents = [];
+      this.replayCommitEvents = [];
+      this.replayPhraseResults = [];
+    }
     // URLを解放せずにオーディオとリスナーをクリーンアップ
     if (this.audio) {
       this.audio.pause();
@@ -1462,9 +1641,13 @@ export class ChartGame {
       }
     } else if ((e.code === 'ArrowRight' || e.code === 'ArrowLeft') && e.shiftKey && !e.ctrlKey && !e.isComposing) {
       e.preventDefault();
-      const cTime = this.getCurrentTimeSec();
+      // grace 中の連続シークでも位置が進む/戻るよう、論理時刻 (duration + grace 経過) を起点にする。
+      // audio.currentTime 起点だと grace 中は常に duration が起点になり、
+      // シークのたびに grace がリセットされて進捗が巻き戻るバグになる。
+      const cTime = this.getCurrentLogicalSec();
       const delta = e.code === 'ArrowRight' ? 5 : -5;
-      const target = Math.max(0, Math.min(cTime + delta, this.audio.duration || 0));
+      const dur = this.audio.duration || 0;
+      const target = Math.max(0, Math.min(cTime + delta, dur + this.GRACE_DURATION));
       this.seekReplay(target);
     }
   };
@@ -1537,6 +1720,15 @@ export class ChartGame {
           this.seekGuard = false;
         } else {
           audioTime = 0;
+        }
+      }
+
+      // リプレイシーク完了待ち: メディアが目標時刻へ到達するまで audioTime を固定する
+      if (!this.virtualMode && this.replaySeekGuard !== null) {
+        if (Math.abs(audioTime - this.replaySeekGuard) < 0.5) {
+          this.replaySeekGuard = null;
+        } else {
+          audioTime = this.replaySeekGuard;
         }
       }
 
@@ -1637,13 +1829,59 @@ export class ChartGame {
         // 記録時と同じ論理時刻を使う（grace 中は audio.duration を超えて進む）
         const t_ms = this.getReplayTimeMs();
 
-        while (
-          this.replayCommitEventCursor < this.replayCommitEvents.length &&
-          this.replayCommitEvents[this.replayCommitEventCursor].t_ms <= t_ms
-        ) {
-          this.applyCommitEvent(this.replayCommitEvents[this.replayCommitEventCursor]);
-          this.replayCommitEventCursor++;
+        // キーイベントとコミットイベントは実時刻順にマージして処理する。
+        // 別々のループで「コミット全部 → キー全部」と処理すると、同じ tick に入った
+        // 「フレーズを打ち切った最後のキー(t=1000)」より「確定(t=1005)」が先に処理され、
+        // 最後のキーが表示される前に薄表示化 + 次フレーズの打ち始めと誤認されてしまう。
+        // 同時刻はキーを先に処理する (確定はそのキーの結果なので)。
+        let keyAdvanced = false;
+        while (true) {
+          const nextKey =
+            this.replayKeyEventCursor < this.replayKeyEvents.length
+              ? this.replayKeyEvents[this.replayKeyEventCursor]
+              : null;
+          const nextCommit =
+            this.replayCommitEventCursor < this.replayCommitEvents.length
+              ? this.replayCommitEvents[this.replayCommitEventCursor]
+              : null;
+          const keyDue = nextKey !== null && nextKey.t_ms <= t_ms;
+          const commitDue = nextCommit !== null && nextCommit.t_ms <= t_ms;
+          if (!keyDue && !commitDue) break;
+
+          if (keyDue && (!commitDue || nextKey!.t_ms <= nextCommit!.t_ms)) {
+            const ev = nextKey!;
+            // フレーズ確定後の最初のキーで薄表示中の履歴を破棄して溜め直す。
+            // ただし採点待ちフレーズが無い間の入力 (Shift+Enter スキップ等) は
+            // 「次のフレーズのための入力」とみなさず、破棄しない。
+            const startsNextPhrase =
+              this.replayKeyDisplayPendingClear && status.unClearLrcs.length > 0;
+            this.replayKeyDisplayLog.update(log => {
+              const base = startsNextPhrase ? [] : log;
+              const next = [...base, { t_ms: ev.t_ms, code: ev.code, ime: ev.ime, repeat: ev.repeat ?? false, shift: ev.shift ?? false, ctrl: ev.ctrl ?? false }];
+              return next.length > this.REPLAY_KEY_DISPLAY_MAX
+                ? next.slice(-this.REPLAY_KEY_DISPLAY_MAX)
+                : next;
+            });
+            if (startsNextPhrase) {
+              this.replayKeyDisplayPendingClear = false;
+              this.replayKeyDisplayDimmed.set(false);
+            }
+            this.replayKeyEventCursor++;
+            keyAdvanced = true;
+          } else {
+            const commitEv = nextCommit!;
+            this.applyCommitEvent(commitEv);
+            this.replayCommitEventCursor++;
+            // 歌詞フレーズをクリアしたら、確定済み入力を薄表示に切り替え、
+            // 次のフレーズの打ち始めで履歴を消して新しく溜め直す
+            if (commitEv.is_cleared) {
+              this.replayKeyDisplayPendingClear = true;
+              this.replayKeyDisplayDimmed.set(true);
+              hasChange = true;
+            }
+          }
         }
+        if (keyAdvanced) hasChange = true;
 
         while (
           this.replayPhraseResultCursor < this.replayPhraseResults.length &&
@@ -1663,23 +1901,6 @@ export class ChartGame {
           }
           this.replayPhraseResultCursor++;
         }
-
-        let keyAdvanced = false;
-        while (
-          this.replayKeyEventCursor < this.replayKeyEvents.length &&
-          this.replayKeyEvents[this.replayKeyEventCursor].t_ms <= t_ms
-        ) {
-          const ev = this.replayKeyEvents[this.replayKeyEventCursor];
-          this.replayKeyDisplayLog.update(log => {
-            const next = [...log, { t_ms: ev.t_ms, code: ev.code, ime: ev.ime, repeat: ev.repeat ?? false }];
-            return next.length > this.REPLAY_KEY_DISPLAY_MAX
-              ? next.slice(-this.REPLAY_KEY_DISPLAY_MAX)
-              : next;
-          });
-          this.replayKeyEventCursor++;
-          keyAdvanced = true;
-        }
-        if (keyAdvanced) hasChange = true;
       }
 
       // --- Limit total display lines to 5 ---
@@ -1729,6 +1950,11 @@ export class ChartGame {
         );
         if (skippedPhrases.length > 0) {
           this.lostCount.update((n) => n + skippedPhrases.length);
+          // 統計: 画面外へスクロールして未クリアのまま消えたフレーズを lost として記録
+          for (const item of skippedPhrases) {
+            const idx = this.lyricIndexMap.get(item);
+            if (idx !== undefined) this.lostPhraseIndices.push(idx);
+          }
         }
         status.unClearLrcs = status.unClearLrcs.filter(
           (u) => u.line !== removedLine,

@@ -121,6 +121,9 @@
     lineIndex: number;
     lineText: string;
     missingChar: string;
+    // フレーズをルビ付きで描画するための分解済みセグメント
+    // (reading !== text の文字は読みあり = ルビを振れる)
+    segments: { text: string; reading: string }[];
   };
 
   type EnhancedValidationResult = ValidationResult & { startTime: number };
@@ -640,6 +643,10 @@
               lineText: segment.phrase,
               missingChar: char,
               startTime: segment.time,
+              segments: segment.segments.map((s) => ({
+                text: s.text,
+                reading: s.reading,
+              })),
             });
           }
         }
@@ -1692,6 +1699,68 @@
   // フォルダ選択用 隠しinput (DOM ref)
   let folderInputRef: HTMLInputElement | undefined = $state();
 
+  // --- 個別ファイルインポート (各エディタのヘッダーの LRC / 音声 / Repl ボタン) ---
+  type ImportKind = "lrc" | "audio" | "repl";
+  let importInputRef: HTMLInputElement | undefined = $state();
+  let importKind: ImportKind = "lrc";
+  let importAccept = $state(".lrc");
+
+  function openImport(kind: ImportKind) {
+    if (kind !== "audio" && !chart.isMasterLoaded) {
+      alert("Master repl is still loading, please wait.");
+      return;
+    }
+    if (kind === "lrc" && chart.lrcContent.trim()) {
+      const ok = confirm(
+        "現在のLRCをインポートしたファイルで上書きしますか？\nRepl・タイムタグも再生成されます。",
+      );
+      if (!ok) return;
+    }
+    if (kind === "repl" && chart.chartReplContent.trim()) {
+      const ok = confirm(
+        "現在のReplをインポートしたファイルで上書きしますか？",
+      );
+      if (!ok) return;
+    }
+    importKind = kind;
+    importAccept =
+      kind === "lrc" ? ".lrc" : kind === "repl" ? ".txt" : "audio/*";
+    // accept 属性の反映後に開く
+    tick().then(() => importInputRef?.click());
+  }
+
+  async function handleImportSelect(
+    e: Event & { currentTarget: HTMLInputElement },
+  ) {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = ""; // 同じファイルを再選択できるようにリセット
+    if (!file) return;
+
+    if (importKind === "audio") {
+      // メディアのみ差し替え (loadFromFiles は画像もクリアするため直接処理)
+      revokeObjectUrl(player.audioSrc);
+      revokeObjectUrl(player.videoSrc);
+      player.videoSrc = null;
+      if (player.ytPlayer) {
+        player.ytPlayer.destroy();
+        player.ytPlayer = null;
+      }
+      player.audioMode = "file";
+      player.audioSrc = URL.createObjectURL(file);
+      return;
+    }
+
+    // repl は loadFromFiles が ".repl.txt" 末尾で判定するため名前を揃える
+    let f = file;
+    if (importKind === "repl" && !file.name.endsWith(".repl.txt")) {
+      f = new File([file], file.name.replace(/\.txt$/i, "") + ".repl.txt", {
+        type: file.type,
+      });
+    }
+    const title = file.name.replace(/\.[^.]+$/, "");
+    await loadFromFiles([f], title);
+  }
+
   // --- ドラッグ&ドロップ ---
   async function readAllEntries(
     dirEntry: FileSystemDirectoryEntry,
@@ -2040,9 +2109,32 @@
     return true;
   }
 
+  /** Enter と同じ動作: 最後にタグ付けした文字に endTime を設定 */
+  function setEndTimeAtLastTagged() {
+    if (tt.lastTaggedLine < 0 || tt.lastTaggedChar < 0) return;
+    const lastTagged: TtLastTagged = {
+      line: tt.lastTaggedLine,
+      char: tt.lastTaggedChar,
+    };
+    const endT = ttCurrentTime() - $settings.timeOffset;
+    const endResult = setEndTime(tt.lines, lastTagged, endT);
+    if (endResult) {
+      ttRecordOp({ type: 'setEndTime', li: endResult.li, ci: endResult.ci, prev: endResult.prevEndTime, next: endT });
+      tt.lines = [...tt.lines];
+      generateTtLrc();
+      updateWaveformEndCache(endResult.prevEndTime, endT);
+    }
+  }
+
   /** pending中のエンドチェックを即時確定 */
   function flushPendingEndCheck() {
     if (tt.pendingEndCheckKey === null) return;
+    // G/H は Enter 相当の動作 (isEndCheck 位置ではなく最後にタグ付けした文字へ)
+    if (tt.pendingEndCheckKey === "KeyG" || tt.pendingEndCheckKey === "KeyH") {
+      tt.pendingEndCheckKey = null;
+      setEndTimeAtLastTagged();
+      return;
+    }
     const lineChars = tt.lines[tt.pendingEndCheckLine]?.chars;
     if (lineChars) {
       let found = false;
@@ -2068,6 +2160,13 @@
     if (!ttIsPlaying() || tt.pendingEndCheckKey === null) return;
     if (e.code !== tt.pendingEndCheckKey) return;
 
+    // G/H キー: キーアップで Enter と同じ動作 (最後にタグ付けした文字に endTime)
+    if (e.code === "KeyG" || e.code === "KeyH") {
+      tt.pendingEndCheckKey = null;
+      setEndTimeAtLastTagged();
+      return;
+    }
+
     const lineChars = tt.lines[tt.pendingEndCheckLine]?.chars;
     if (!lineChars) {
       tt.pendingEndCheckKey = null;
@@ -2076,9 +2175,11 @@
 
     let found = false;
     const endT = ttCurrentTime() - $settings.timeOffset;
+    const prevEnds: (number | null)[] = [];
     for (let i = tt.pendingEndCheckChar; i < lineChars.length; i++) {
       if (i > tt.pendingEndCheckChar && lineChars[i].checkCount > 0) break;
       if (lineChars[i].isEndCheck) {
+        prevEnds.push(lineChars[i].endTime);
         lineChars[i].endTime = endT;
         found = true;
       }
@@ -2087,7 +2188,8 @@
     if (found) {
       tt.lines = [...tt.lines];
       generateTtLrc();
-      waveformEndTimesCache.push(endT);
+      // 打ち直し時に古い endTime の青線が残らないよう prev を除去してから追加
+      for (const prev of prevEnds) updateWaveformEndCache(prev, endT);
     }
     tt.pendingEndCheckKey = null;
   }
@@ -2101,6 +2203,16 @@
       if (idx >= 0) cache.splice(idx, 1);
     }
     if (next !== null) cache.push(next);
+  }
+
+  // endTime の波形キャッシュ更新: 打ち直し時に古い値が青線として残らないよう
+  // prev を除去してから next を追加する（updateWaveformCacheTime の endTime 版）。
+  function updateWaveformEndCache(prev: number | null, next: number | null) {
+    if (prev !== null) {
+      const idx = waveformEndTimesCache.indexOf(prev);
+      if (idx >= 0) waveformEndTimesCache.splice(idx, 1);
+    }
+    if (next !== null) waveformEndTimesCache.push(next);
   }
 
   function rebuildWaveformTagCache() {
@@ -2147,10 +2259,10 @@
         playerStop();
         break;
       case "KeyZ":
-        playerSeek(playerGetTime() - 2);
+        playerSeek(playerGetTime() - 2 * tt.playbackRate);
         break;
       case "KeyX":
-        playerSeek(playerGetTime() + 2);
+        playerSeek(playerGetTime() + 2 * tt.playbackRate);
         break;
       case "KeyQ":
         tt.playbackRate = Math.max(0.1, tt.playbackRate - 0.1);
@@ -2182,7 +2294,7 @@
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") ui.shiftHeld = true;
 
     const playing = ttIsPlaying();
-    const isTagKey = e.code === "Space" || e.code === "KeyV" || e.code === "KeyB" || e.code === "KeyN";
+    const isTagKey = e.code === "Space" || e.code === "KeyV" || e.code === "KeyB" || e.code === "KeyN" || e.code === "KeyG" || e.code === "KeyH";
 
     // Common shortcuts (work even when tt.lines is empty)
     switch (e.code) {
@@ -2246,7 +2358,7 @@
           return;
         }
         e.preventDefault();
-        playerSeek(playerGetTime() - 2);
+        playerSeek(playerGetTime() - 2 * tt.playbackRate);
         return;
       case "KeyY":
         if (e.ctrlKey) {
@@ -2257,7 +2369,7 @@
         return;
       case "KeyX":
         e.preventDefault();
-        playerSeek(playerGetTime() + 2);
+        playerSeek(playerGetTime() + 2 * tt.playbackRate);
         return;
       case "KeyQ":
         e.preventDefault();
@@ -2458,20 +2570,7 @@
       }
       if (e.code === "Enter") {
         e.preventDefault();
-        if (tt.lastTaggedLine >= 0 && tt.lastTaggedChar >= 0) {
-          const lastTagged: TtLastTagged = {
-            line: tt.lastTaggedLine,
-            char: tt.lastTaggedChar,
-          };
-          const endT = ttCurrentTime() - $settings.timeOffset;
-          const endResult = setEndTime(tt.lines, lastTagged, endT);
-          if (endResult) {
-            ttRecordOp({ type: 'setEndTime', li: endResult.li, ci: endResult.ci, prev: endResult.prevEndTime, next: endT });
-            tt.lines = [...tt.lines];
-            generateTtLrc();
-            waveformEndTimesCache.push(endT);
-          }
-        }
+        setEndTimeAtLastTagged();
         return;
       }
       if (e.shiftKey && e.code === "Backspace") {
@@ -2737,6 +2836,14 @@
           class="hiddenInput"
           webkitdirectory
         />
+        <!-- 個別インポート (LRC / 音声 / Repl) 用 隠しinput -->
+        <input
+          bind:this={importInputRef}
+          type="file"
+          accept={importAccept}
+          onchange={handleImportSelect}
+          class="hiddenInput"
+        />
         <button
           class="ioBtn"
           onclick={(e) =>
@@ -2835,15 +2942,17 @@
         {playAudioAt}
         {startPipeEdit}
         {endPipeEdit}
+        {openImport}
       />
     {:else if ui.activeTab === "timetag"}
       <TimeTagTab
         downloadLrc={() => downloadTtLrc(ttRegenCb)}
         {playerSeek}
+        {openImport}
         bind:editorAreaEl={ttEditorAreaEl}
       />
     {:else if ui.activeTab === "lrc"}
-      <LrcTab downloadLrc={() => downloadTtLrc(ttRegenCb)} />
+      <LrcTab downloadLrc={() => downloadTtLrc(ttRegenCb)} {openImport} />
     {/if}
 
     <!-- Shortcuts Popup -->
@@ -3024,7 +3133,6 @@
     height: 100%;
     background: #0d0d0d;
     color: #eee;
-    font-family: "Hiragino Sans", sans-serif;
     overflow: hidden;
     padding: 6px;
     gap: 6px;
@@ -3719,6 +3827,19 @@
   }
   :global(.ttExportBtn:hover) {
     background: #1e5e1e !important;
+  }
+  /* インポートボタン: 背景色以外はエクスポートボタンと同一 */
+  :global(.ttImportBtn) {
+    background: color-mix(in srgb, var(--accent), black 45%) !important;
+    color: white !important;
+    padding: 6px 8px !important;
+    min-width: 128px !important;
+    width: auto !important;
+    text-align: center;
+    box-sizing: border-box !important;
+  }
+  :global(.ttImportBtn:hover) {
+    background: color-mix(in srgb, var(--accent), black 60%) !important;
   }
 
   /* Overlay / Shortcuts */

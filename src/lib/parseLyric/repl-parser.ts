@@ -36,6 +36,8 @@
  *   null    → 仮名文字なので注釈不要（デフォルト処理）
  */
 
+import { isKana } from "./char-class";
+
 export const R_START = "\x01";
 export const R_END = "\x02";
 export const R_SPAN = "\x06";
@@ -71,7 +73,7 @@ export class ReplParser {
   }
 
   private static isKana(ch: string): boolean {
-    return /^[ぁ-んァ-ヶー]$/.test(ch);
+    return isKana(ch);
   }
 
   private static escapeRegExp(s: string): string {
@@ -370,7 +372,6 @@ export class ReplParser {
    * - 推測できないエントリ（当て字等）はそのまま維持（パイプなし=全体読み）
    */
   static migrate(replTxt: string): string {
-    const kanaRegex = /[ぁ-んァ-ヶー]/;
 
     // --- 旧ロジック（マイグレーション専用） ---
 
@@ -381,7 +382,7 @@ export class ReplParser {
       let cur = "";
       let curType: "kanji" | "kana" | null = null;
       for (const ch of kanji) {
-        const t = kanaRegex.test(ch) ? "kana" : "kanji";
+        const t = isKana(ch) ? "kana" : "kanji";
         if (t !== curType) {
           if (cur) segs.push({ type: curType!, text: cur });
           cur = ch;

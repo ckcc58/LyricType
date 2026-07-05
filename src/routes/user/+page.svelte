@@ -1,227 +1,91 @@
 <script lang="ts">
-	import { invalidateAll } from '$app/navigation';
+	import { page } from '$app/stores';
+	import { replaceState } from '$app/navigation';
+	import { get } from 'svelte/store';
+	import AccountTab from './_components/account/AccountTab.svelte';
+	import StatsTab from './_components/stats/StatsTab.svelte';
 
 	let { data } = $props();
 
-	let handle = $state(data.profile.handle);
-	let displayName = $state(data.profile.name);
-	let handleError = $state('');
-	let nameError = $state('');
-	let handleSaving = $state(false);
-	let nameSaving = $state(false);
-	let handleSuccess = $state(false);
-	let nameSuccess = $state(false);
+	// アクティブタブを URL クエリ(?tab=stats)に保存し、再読込でも維持する。
+	let activeTab = $state<'account' | 'stats'>(
+		get(page).url.searchParams.get('tab') === 'stats' ? 'stats' : 'account'
+	);
 
-
-	async function saveHandle() {
-		handleError = '';
-		handleSuccess = false;
-		handleSaving = true;
-		const res = await fetch('/api/profile', {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ handle })
-		});
-		const result = await res.json();
-		handleSaving = false;
-		if (result.error) {
-			handleError = result.error;
-		} else {
-			handleSuccess = true;
-			await invalidateAll();
-		}
-	}
-
-	async function saveName() {
-		nameError = '';
-		nameSuccess = false;
-		nameSaving = true;
-		const res = await fetch('/api/profile', {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ name: displayName })
-		});
-		const result = await res.json();
-		nameSaving = false;
-		if (result.error) {
-			nameError = result.error;
-		} else {
-			nameSuccess = true;
-			await invalidateAll();
-		}
+	function selectTab(tab: 'account' | 'stats') {
+		activeTab = tab;
+		const url = new URL(get(page).url);
+		url.searchParams.set('tab', tab);
+		replaceState(url, {});
 	}
 </script>
 
 <div class="account-page">
+	<div class="tab-bar">
+		<button
+			class="tab"
+			class:active={activeTab === 'account'}
+			onclick={() => selectTab('account')}>アカウント設定</button
+		>
+		<button
+			class="tab"
+			class:active={activeTab === 'stats'}
+			onclick={() => selectTab('stats')}>統計</button
+		>
+	</div>
+
 	<div class="account-card">
-		<h1>アカウント設定</h1>
-
-		<section>
-			<h2>ハンドル <span class="at">@</span></h2>
-			<p class="desc">変更後30日間は他のユーザーが同じハンドルを使用できません。</p>
-			<div class="field-row">
-				<input
-					type="text"
-					bind:value={handle}
-					maxlength="20"
-					pattern="[a-zA-Z0-9_]+"
-					placeholder="handle"
-					autocomplete="off"
-				/>
-				<button onclick={saveHandle} disabled={handleSaving || handle === data.profile.handle}>
-					{handleSaving ? '保存中...' : '保存'}
-				</button>
-			</div>
-			<small>1〜20文字、英数字とアンダースコア(_)のみ</small>
-			{#if handleError}<p class="error">{handleError}</p>{/if}
-			{#if handleSuccess}<p class="success">ハンドルを更新しました</p>{/if}
-		</section>
-
-		<section>
-			<h2>表示名</h2>
-			<p class="desc">自由に変更できます。他ユーザーと同じ名前も使用可能です。</p>
-			<div class="field-row">
-				<input
-					type="text"
-					bind:value={displayName}
-					maxlength="30"
-					placeholder="表示名"
-					autocomplete="off"
-				/>
-				<button onclick={saveName} disabled={nameSaving || displayName === data.profile.name}>
-					{nameSaving ? '保存中...' : '保存'}
-				</button>
-			</div>
-			<small>1〜30文字</small>
-			{#if nameError}<p class="error">{nameError}</p>{/if}
-			{#if nameSuccess}<p class="success">表示名を更新しました</p>{/if}
-		</section>
-
-		<section class="danger-zone">
-			<h2>アカウント</h2>
-			<form method="POST" action="/auth/logout">
-				<input type="hidden" name="redirectTo" value="/" />
-				<button type="submit" class="logout-btn">ログアウト</button>
-			</form>
-		</section>
+		{#if activeTab === 'account'}
+			<AccountTab {data} />
+		{:else}
+			<StatsTab {data} />
+		{/if}
 	</div>
 </div>
 
 <style>
+	/* 上から下まで背景色を統一（ページ全体を1色で塗りつぶす） */
 	.account-page {
 		display: flex;
-		justify-content: center;
+		flex-direction: column;
+		align-items: center;
+		gap: 24px;
 		padding: 40px 24px;
-	}
-
-	.account-card {
+		min-height: 100%;
+		box-sizing: border-box;
 		background: #1e1e1e;
-		border: 1px solid #333;
-		border-radius: 12px;
-		padding: 40px;
-		max-width: 550px;
-		width: 100%;
 	}
 
-	h1 {
-		color: #ddd;
-		margin: 0 0 32px;
-		font-size: 1.5rem;
-	}
-
-	section {
-		margin-bottom: 32px;
-	}
-
-	h2 {
-		color: #ccc;
-		font-size: 1rem;
-		margin: 0 0 4px;
-	}
-
-	.at {
-		color: #4a9eff;
-	}
-
-	.desc {
-		color: #666;
-		font-size: 0.82rem;
-		margin: 0 0 10px;
-	}
-
-	.field-row {
+	.tab-bar {
 		display: flex;
-		gap: 8px;
-		margin-bottom: 4px;
+		gap: 4px;
+		width: 100%;
+		border-bottom: 1px solid #3a3a3a;
 	}
-
-	input {
-		flex: 1;
-		padding: 10px 12px;
-		border-radius: 6px;
-		border: 1px solid #444;
-		background: #2a2a2a;
-		color: #ddd;
-		font-size: 1rem;
-	}
-
-	button {
-		padding: 10px 18px;
-		border-radius: 6px;
-		border: none;
-		background: #4a9eff;
-		color: white;
-		font-size: 0.9rem;
-		cursor: pointer;
-		transition: background 0.15s;
-		white-space: nowrap;
-	}
-
-	button:hover:not(:disabled) {
-		background: #3a8eef;
-	}
-
-	button:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
-
-	small {
-		color: #555;
-		font-size: 0.8rem;
-	}
-
-	.error {
-		color: #ff6b6b;
-		font-size: 0.85rem;
-		margin: 6px 0 0;
-	}
-
-	.success {
-		color: #4caf50;
-		font-size: 0.85rem;
-		margin: 6px 0 0;
-	}
-
-	.danger-zone {
-		border-top: 1px solid #333;
-		padding-top: 24px;
-		margin-bottom: 0;
-	}
-
-	.logout-btn {
-		padding: 10px 18px;
-		border-radius: 6px;
-		border: 1px solid #555;
+	.tab {
+		padding: 12px 20px;
 		background: transparent;
+		border: none;
+		border-bottom: 2px solid transparent;
+		border-radius: 0;
 		color: #aaa;
-		font-size: 0.9rem;
+		font-size: 0.95rem;
+		font-weight: 600;
 		cursor: pointer;
-		transition: border-color 0.15s, color 0.15s;
+		transition: color 0.15s, border-color 0.15s;
+	}
+	.tab:hover:not(.active) {
+		color: #e6e6e6;
+	}
+	.tab.active {
+		color: #4a9eff;
+		border-bottom-color: #4a9eff;
 	}
 
-	.logout-btn:hover {
-		border-color: #ff6b6b;
-		color: #ff6b6b;
+	/* カードは独立した箱にせず、統一背景に溶け込ませる */
+	.account-card {
+		background: transparent;
+		padding: 32px 0 0;
+		width: 100%;
 	}
 </style>

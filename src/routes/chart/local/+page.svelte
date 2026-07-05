@@ -173,6 +173,9 @@
     }
 
     onMount(() => {
+        // 統計: このページは常にローカル練習(source=local, chart_id=null)として記録する
+        ChartGame.statsContext = { chartId: null, source: 'local' };
+
         addKeyHandler();
         document.addEventListener('keydown', handleStartKey);
 
@@ -211,7 +214,15 @@
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseleave', onMouseLeave);
 
+        // 統計: タブ離脱/リロード時に進行中プレイを beacon で送る
+        const onPageHide = () => ChartGame.flushPlayStats({ viaBeacon: true });
+        window.addEventListener('pagehide', onPageHide);
+
         return () => {
+            // SPA 遷移で離脱する場合は進行中プレイをフラッシュしてから破棄
+            ChartGame.flushPlayStats();
+            ChartGame.statsContext = null;
+            window.removeEventListener('pagehide', onPageHide);
             ChartGame.stop();
             ChartGame.init();
             document.removeEventListener('keydown', handleStartKey);
@@ -241,7 +252,7 @@
                     {/if}
                 {/if}
 
-                <GameOverlay bind:this={overlayRef}>
+                <GameOverlay bind:this={overlayRef} showScrollHint={false}>
                     {#snippet controlBar()}
                         <div id="control">
                             <button
@@ -329,15 +340,13 @@
 {/if}
 
 <style>
-    :global(body) {
-        background-color: #000;
-    }
-
     #game {
         display: flex;
         flex-direction: column;
         align-items: center;
-        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        min-height: 100%;
+        box-sizing: border-box;
+        background-color: var(--bg-game);
     }
 
     #control {
@@ -425,7 +434,6 @@
         flex-direction: column;
         justify-content: center;
         align-items: center;
-        font-family: Segoe UI, "Yu Gothic", "YuGothic", sans-serif !important;
     }
 
     #frame img,

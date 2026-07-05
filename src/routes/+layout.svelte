@@ -2,6 +2,7 @@
   import { page, navigating } from '$app/state';
   import type { Snippet } from 'svelte';
   import { settings, updateSetting } from '$lib/settings';
+  import { FONT_OPTIONS, fontStack, GOOGLE_FONTS_HREF } from '$lib/fonts';
   import { volume } from '../store';
   import { QueryClientProvider } from '@tanstack/svelte-query';
   import { createQueryClient } from '$lib/query-client';
@@ -60,6 +61,11 @@
     volume.set($settings.volume);
   });
 
+  // settings.fontFamily → 全体フォント適用（--app-font を html に反映）
+  $effect(() => {
+    document.documentElement.style.setProperty('--app-font', fontStack($settings.fontFamily));
+  });
+
   type NavItem = {
     href: string;
     label: string;
@@ -101,6 +107,9 @@
   <link rel="preconnect" href="https://i.ytimg.com" crossorigin="anonymous" />
   <link rel="preconnect" href="https://www.youtube.com" />
   <link rel="dns-prefetch" href="https://i.ytimg.com" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+  <link rel="stylesheet" href={GOOGLE_FONTS_HREF} />
 </svelte:head>
 
 {#if navProgressVisible}
@@ -189,6 +198,20 @@
         />
       </div>
 
+      <div class="settingGroup">
+        <label class="settingLabel" for="fontSelect">フォント</label>
+        <select
+          id="fontSelect"
+          class="settingSelect"
+          value={$settings.fontFamily}
+          onchange={(e) => updateSetting('fontFamily', (e.currentTarget as HTMLSelectElement).value)}
+        >
+          {#each FONT_OPTIONS as f}
+            <option value={f.id} style="font-family: {f.stack}">{f.label}</option>
+          {/each}
+        </select>
+      </div>
+
     </div>
   {/if}
 
@@ -207,7 +230,7 @@
     padding: 1px 6px;
     margin: 0 2px;
     font-size: 0.78rem;
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    font-family: inherit; /* kbd の UA 既定 (monospace) を打ち消す */
     color: rgba(255, 255, 255, 0.65);
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.25);
@@ -234,12 +257,41 @@
     will-change: width, opacity;
   }
 
+  /* デザイントークン。使い方・追加ルールは /DESIGN.md 参照 */
+  :global(:root) {
+    --bg-page: #15161a;
+    --bg-editor: #0d0d0d;
+    --bg-game: #000;
+    --bg-card: #24262b;
+    --bg-input: #2a2a2a;
+    --border: #333;
+    --border-strong: #444;
+    --text-primary: #eee;
+    --text-secondary: #bbb;
+    --text-muted: #aaa;
+    --accent: #4a9eff;
+    --accent-game: #4dd0e1;
+    --danger: #ff6b6b;
+    --warn: #ffa726;
+    --success: #4caf50;
+  }
+
   :global(html),
   :global(body) {
     margin: 0;
     padding: 0;
     overflow: hidden;
     background: #0d0d0d;
+    /* 既定は M PLUS 1。設定で選ぶと --app-font が上書きする（fonts.ts / 設定パネル参照） */
+    font-family: var(--app-font, "M PLUS 1", "Hiragino Sans", "Yu Gothic UI", Meiryo, Tahoma, sans-serif);
+  }
+
+  /* フォームコントロールは body のフォントを継承しないため明示 */
+  :global(button),
+  :global(input),
+  :global(select),
+  :global(textarea) {
+    font-family: inherit;
   }
 
   /* グローバルスクロールバー */
@@ -425,6 +477,21 @@
   .settingSlider {
     width: 100%;
     accent-color: #0070f3;
+  }
+
+  .settingSelect {
+    width: 100%;
+    padding: 6px 8px;
+    background: #2a2a2a;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .settingSelect:focus {
+    outline: none;
+    border-color: #4a9eff;
   }
 
   /* Auth items */

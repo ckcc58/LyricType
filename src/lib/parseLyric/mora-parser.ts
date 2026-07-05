@@ -5,8 +5,10 @@
  */
 
 // 小書き仮名（拗音構成要素）— っ は含まない（促音は前モーラに結合する特別扱い）
-const SMALL_KANA = /^[ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ]$/;
-const SOKUON = /^[っッ]$/;
+// timetag-parser.ts からも import して共有する。いずれも .test() で1文字判定する用途のため
+// non-global であることが前提（g フラグを付けると lastIndex が進み共有先で誤判定する）。
+export const SMALL_KANA = /^[ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ]$/;
+export const SOKUON = /^[っッ]$/;
 
 export class MoraParser {
   /**

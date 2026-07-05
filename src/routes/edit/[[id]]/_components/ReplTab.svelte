@@ -13,19 +13,20 @@
     countPipeCoverage,
   } from "../_lib/repl/coverage";
 
-  // 歌詞フレーズは <ruby>/<rt> タグを含みうる文字列で、素の歌詞はユーザー入力(LRC)
-  // 由来。そのまま {@html} で描画すると任意 HTML/スクリプトが実行される XSS になるため、
-  // ruby の読み(rt)を落としタグを除去してプレーンテキスト化する
-  // ({} 補間側でも再エスケープされるので二重に安全)。
-  function plainLineText(s: string): string {
-    return s.replace(/<rt>[\s\S]*?<\/rt>/g, "").replace(/<[^>]*>/g, "");
-  }
+  // フレーズは分解済み segments ({text, reading}) で受け取り、読みのある文字
+  // (reading !== text) は <ruby> でルビ付き描画する。text/reading は Svelte の
+  // {} 補間でエスケープされるため、生 HTML を {@html} する必要はなく XSS 安全。
+  // 読みのない漢字 (reading === text かつ漢字) は下線で強調する。
+  const kanjiRe = /[々〆ヵヶ一-鿿]/;
 
   type MissingKanjiEntry = {
     lineIndex: number;
     lineText: string;
     missingChar: string;
     startTime: number;
+    // フレーズをルビ付きで描画するための分解済みセグメント
+    // (reading !== text の文字 = 読みあり → ルビを振る)
+    segments: { text: string; reading: string }[];
   };
   type NeedsPipeEntry = {
     kanji: string;
@@ -48,6 +49,8 @@
     playAudioAt: (time: number) => void;
     startPipeEdit: () => void;
     endPipeEdit: () => void;
+    /** 個別ファイルインポート (親の隠し input を開く) */
+    openImport: (kind: "lrc" | "audio" | "repl") => void;
   };
   let {
     optimizeDiff = [],
@@ -60,6 +63,7 @@
     playAudioAt,
     startPipeEdit,
     endPipeEdit,
+    openImport,
   }: Props = $props();
 
   let chartLineCount = $derived(
@@ -74,6 +78,9 @@
 <div class="lrcToolbar">
   <button class="ttBtn ttExportBtn" onclick={downloadChartRepl}>
     Replエクスポート
+  </button>
+  <button class="ttBtn ttImportBtn" onclick={() => openImport("repl")}>
+    Replインポート
   </button>
 </div>
 <div class="mainGrid" class:singleCol={!showRight}>
@@ -266,7 +273,10 @@
                 tabindex="0"
                 onkeydown={(e) => {
                   if (e.key === "Enter") playAudioAt(item.startTime || 0);
-                }}>{plainLineText(item.lineText)}</span
+                }}
+                >{#each item.segments as seg}{#if seg.reading && seg.reading !== seg.text}<ruby
+                      >{seg.text}<rt>{seg.reading}</rt></ruby
+                    >{:else if kanjiRe.test(seg.text)}<u>{seg.text}</u>{:else}{seg.text}{/if}{/each}</span
               >
             </div>
           {/each}

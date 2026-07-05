@@ -4,6 +4,8 @@ import type { Handle } from '@sveltejs/kit';
 import { createClient } from '@supabase/supabase-js';
 import { SUPABASE_SERVICE_ROLE_KEY } from '$env/static/private';
 import { PUBLIC_SUPABASE_URL } from '$env/static/public';
+import { dev } from '$app/environment';
+import { env as privateEnv } from '$env/dynamic/private';
 import {
 	readProfileCookie,
 	writeProfileCookie,
@@ -12,10 +14,25 @@ import {
 } from '$lib/server/profile-cookie';
 
 const profileHandle: Handle = async ({ event, resolve }) => {
-	const session = await event.locals.auth();
 	const supabase = createClient(PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
 	event.locals.supabase = supabase;
+
+	// 開発専用バイパス: 隔離ローカルDB検証時、Google OAuth を介さずテストユーザーで
+	// ログイン状態にする。dev ビルドかつ DEV_AUTH_BYPASS=1 のときだけ有効。
+	// 本番ビルドでは dev===false となりこのブロックは実行されない（dead-code）。
+	if (dev && privateEnv.DEV_AUTH_BYPASS === '1') {
+		const authId = privateEnv.DEV_AUTH_AUTH_ID || 'dev-user';
+		const { data } = await supabase
+			.from('users')
+			.select('id, handle, name, role')
+			.eq('auth_id', authId)
+			.single();
+		event.locals.user = { id: authId };
+		event.locals.profile = data ?? null;
+		return resolve(event);
+	}
+
+	const session = await event.locals.auth();
 
 	if (session?.user?.id) {
 		const authId = session.user.id;

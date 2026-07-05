@@ -2,6 +2,13 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { resultSubmitSchema } from '$lib/schemas/result';
 
+// 版の content-addressing 用ハッシュ。旧クライアント hashLyric と同一の djb2。
+function djb2Hex(s: string): string {
+	let h = 5381;
+	for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
+	return (h >>> 0).toString(16);
+}
+
 export const POST: RequestHandler = async ({ request, locals }) => {
 	// 認証チェック
 	if (!locals.user || !locals.profile) {
@@ -23,16 +30,40 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	}
 	const data = parsed.data;
 
-	// 譜面の存在確認 + ノート数取得（不正チェック用）
+	// 譜面の存在確認 + ノート数 + スナップショット元データ取得
 	const { data: chart, error: chartError } = await locals.supabase
 		.from('charts')
-		.select('id, note_count')
+		.select('id, note_count, chart_data, updated_at, created_at')
 		.eq('id', data.chart_id)
 		.single();
 
 	if (chartError || !chart) {
 		return json({ error: '譜面が見つかりません' }, { status: 404 });
 	}
+
+	// 版ズレガード: プレイ開始時の版と現在の版が違う（プレイ中に譜面が更新された）なら拒否。
+	// 許すと「旧版で記録した操作ログ(phrase_index)」が「新版のフレーズ配列」に紐づき
+	// リプレイがズレるため。旧クライアント(client_version 未送信)はスキップする。
+	const currentVersion = chart.updated_at ?? chart.created_at;
+	if (data.client_version && currentVersion) {
+		const played = new Date(data.client_version).getTime();
+		const current = new Date(currentVersion).getTime();
+		if (!Number.isNaN(played) && !Number.isNaN(current) && played !== current) {
+			return json(
+				{ error: '譜面が更新されました。ページを再読み込みしてください' },
+				{ status: 409 },
+			);
+		}
+	}
+
+	// リプレイ用スナップショットは、クライアントの申告値ではなくサーバが信頼できる
+	// charts.chart_data から組む（毒入れ・ゴミ混入を原理的に防ぐ）。
+	// chart_versions.lyric_data は「配列」で保存する形式なので chart_data.lyric を渡す。
+	const lyricArray = (chart.chart_data as { lyric?: unknown } | null)?.lyric;
+	if (!Array.isArray(lyricArray)) {
+		return json({ error: '譜面データが不正です' }, { status: 500 });
+	}
+	const chartHash = djb2Hex(JSON.stringify(lyricArray));
 
 	// 不正チェック: スコア上限
 	const maxPossibleScore = chart.note_count * 100 * 2.5 * 1.5;
@@ -59,14 +90,10 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	const { error: dbError } = await locals.supabase.rpc('insert_result_full', {
 		p_chart_id:            data.chart_id,
 		p_user_id:             locals.profile!.id,
-		p_lyric_data:          data.lyric_data,
-		p_chart_hash:          data.chart_hash,
+		p_lyric_data:          lyricArray,
+		p_chart_hash:          chartHash,
 		p_score:               data.score,
-		p_perfect_count:       data.perfect_count,
-		p_reading_match_count: data.reading_match_count,
-		p_lost_count:          data.lost_count,
 		p_typing_speed:        data.typing_speed,
-		p_total_phrases:       data.total_phrases,
 		p_backspace_count:     backspaceCount,
 		p_key_events:          data.key_events,
 		p_commit_events:       data.commit_events,

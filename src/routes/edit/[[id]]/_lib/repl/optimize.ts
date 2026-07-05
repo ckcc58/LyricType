@@ -2,6 +2,7 @@
 import { tryDecompose, type DecompPart } from "./decompose";
 import { countPipeCoverage, getPlainReading, stripPlusSuffix } from "./coverage";
 import { replSortFn } from "./parse";
+import { KANA_CHARS } from "$lib/parseLyric/char-class";
 
 /**
  * Chart Repl テキストを最適化する。
@@ -21,7 +22,7 @@ export function optimizeChartRepl(
   lrcPlainText: string,
   ignorePipeKeys: Set<string> = new Set(),
 ): string {
-  const kanaCharRegex = /[ぁ-んァ-ヶー]/;
+  const kanaCharRegex = new RegExp(`[${KANA_CHARS}]`);
   const toHira = (ch: string) =>
     ch.replace(/[ァ-ヶ]/g, (m) =>
       String.fromCharCode(m.charCodeAt(0) - 0x60),
@@ -56,6 +57,18 @@ export function optimizeChartRepl(
       (e): e is { key: string; value: string } =>
         e !== null && e.key !== "" && e.value !== "",
     );
+
+  // 元エントリの読みスナップショット (最適化前)。
+  // かなトリムで短縮したキーが「別読みで実在するキー」と衝突すると、
+  // 後続のマージ/統合で誤読エントリに化けるため、トリム採用可否の判定に使う。
+  // 例: 思い出す,おも|い|だ|す → 思い出,おも|い|だ は、思い出,おも|い|で が
+  //     元 repl に存在した場合は採用しない (Opt 2 で除去された後でも)。
+  const originalPlainByKey = new Map<string, Set<string>>();
+  for (const e of entries) {
+    const s = originalPlainByKey.get(e.key) || new Set<string>();
+    s.add(toHira(getPlainReading(e.value)));
+    originalPlainByKey.set(e.key, s);
+  }
 
   // === Opt 4: 複合エントリを引き算分解 (chart repl 内のみ) ===
   const kanjiCharRegex = /[々〆ヵヶ一-鿿]/;
@@ -471,7 +484,16 @@ export function optimizeChartRepl(
   for (const [tKey, group] of groups) {
     const uniqueValues = new Set(group.map((e) => e.trimmedValue));
 
-    if (uniqueValues.size > 1 || maskedLrc.includes(tKey)) {
+    // キーが短縮された結果、元 repl に別読みで存在するキーと一致する場合は
+    // 元エントリを維持する (誤読エントリへの化けを防ぐ)
+    const groupPlain = toHira(getPlainReading(group[0].trimmedValue));
+    const origReadings = originalPlainByKey.get(tKey);
+    const conflictsOriginal =
+      origReadings !== undefined &&
+      group.some((e) => e.originalKey !== tKey) &&
+      [...origReadings].some((r) => r !== groupPlain);
+
+    if (uniqueValues.size > 1 || maskedLrc.includes(tKey) || conflictsOriginal) {
       // 読み競合 or 未カバーテキストにマッチ → 元のエントリを維持
       for (const entry of group) {
         result.push(`${entry.originalKey},${entry.originalValue}`);
