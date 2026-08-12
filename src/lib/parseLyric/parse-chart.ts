@@ -17,7 +17,7 @@
 
 // encoding-japanese はファイル読み込み時のみ必要なので動的importする（バンドルサイズ削減）
 import { ReplParser } from "./repl-parser";
-import { hasTypeable, stripUntypeable } from "./char-class";
+import { hasTypeable, stripUntypeable, stripUntypeableChart, endsEnglishWord, startsEnglishWord, isWordSeparatorSpace, normalizeJoinChar } from "./char-class";
 
 
 export type MediaSource = {
@@ -43,7 +43,9 @@ export type ParsedChart = {
     }[]
 };
 
-export async function parseChart(files: FileList): Promise<ParsedChart | undefined> {
+// files は FileList (input[type=file]) と File[] (ドロップ) の両方を受ける。
+// 内部では Array.from でのみ扱うためどちらでも動く。
+export async function parseChart(files: FileList | File[]): Promise<ParsedChart | undefined> {
     if (!files || files.length === 0) return;
 
     const lrcFile = Array.from(files).find(file => file.name.endsWith(".lrc"));
@@ -127,6 +129,11 @@ export function timeToTimeTag(time: number): string {
 //01/20 7:51 次はここから書いていく
 //tamerpmonkeyの[ニコタイ2たいつべ]から処理を引っ張ってたいつべ用のlyrics_arrayと同じ表記にする
 //template: [time, lyric_kanji, lyric_kana ← 採点用のかな？]
+/** 文字列を正規表現リテラルとして安全に使えるようエスケープする */
+function escapeRegExpLiteral(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function parseLyric(lrc: string, replTxt: string) {
     const splitTag = "TYPIPPI_SPLIT_TAG";
     const splitReg = /([、。\s])/g;
@@ -138,6 +145,14 @@ export function parseLyric(lrc: string, replTxt: string) {
     // 先頭タイムタグ検出用（連続する場合は最後がstartTime、それ以前は前フレーズのendTime）
     const leadingTagsRegex = /^(\s*\[\d\d:\d\d:\d\d\])+/;
     const singleTagRegex = /\[\d\d:\d\d:\d\d\]/g;
+    // 英単語間の半角スペースは、日本語の句読点と同じくフレーズ区切りにする。
+    // ただし打鍵対象の文字なので、区切りスペースは前フレーズの末尾に残したまま
+    // 採点対象に含める (次のフレーズが英単語で始まるときのみ)。
+    const allTagsRe = /\[\d\d:\d\d:\d\d\]/g;
+    // 連結判定はダッシュ/空白の字種違いに左右されないよう正規化してから見る
+    // ("Hi‐hi" の U+2010 などが混ざっていても ASCII の - と同じ扱いになる)
+    const clauseText = (c: string) => normalizeJoinChar(c.replace(allTagsRe, ""));
+
     let lrcList = lrc.trim().split("\n").map(line => {
         // 1. スペース・句読点で分割
         const rawClauses = line.replace(splitReg, "$1" + splitTag).split(splitTag);
@@ -150,10 +165,41 @@ export function parseLyric(lrc: string, replTxt: string) {
             const stripped = s.replace(/\[\d\d:\d\d:\d\d\]/g, "");
             return stripped !== "" && !hasTypeable(stripped);
         };
+        // 英単語間に単独で置かれたハイフン ("like - that" の "- ") は、
+        // 併合せず 1 つの英単語と同じ扱いで独立フレーズにする。
+        // 前後いずれかが英単語でなければ従来どおり併合される (日本語の "あ - い" 等)。
+        const nonEmpty = rawClauses.filter((c) => c !== "");
+        // ダッシュ/空白の字種違いに左右されないよう、正規化済みの本文で判定する
+        const plainOf = (c: string) =>
+            normalizeJoinChar(c.replace(/\[\d\d:\d\d:\d\d\]/g, ""));
+        const isJoinWordClause = (i: number): boolean => {
+            const text = plainOf(nonEmpty[i]);
+            if (!/^[-\s]+$/.test(text)) return false;
+            if (!text.includes("-")) return false;
+            // 前後の実テキストを持つ clause を探して英単語か確認する
+            let prev = "";
+            for (let j = i - 1; j >= 0; j--) {
+                const t = plainOf(nonEmpty[j]);
+                if (t.trim() !== "") { prev = t; break; }
+            }
+            let next = "";
+            for (let j = i + 1; j < nonEmpty.length; j++) {
+                const t = plainOf(nonEmpty[j]);
+                if (t.trim() !== "") { next = t; break; }
+            }
+            return endsEnglishWord(prev) && startsEnglishWord(next);
+        };
+        const joinWordSet = new Set(
+            nonEmpty.filter((_, i) => isJoinWordClause(i)),
+        );
         const clauses: string[] = [];
-        for (const c of rawClauses) {
-            if (c === "") continue;
-            if (clauses.length > 0 && isAllNonTypable(c) && !/^\s+$/.test(c)) {
+        for (const c of nonEmpty) {
+            if (
+                clauses.length > 0 &&
+                isAllNonTypable(c) &&
+                !/^\s+$/.test(c) &&
+                !joinWordSet.has(c)
+            ) {
                 clauses[clauses.length - 1] += c;
             } else {
                 clauses.push(c);
@@ -168,7 +214,33 @@ export function parseLyric(lrc: string, replTxt: string) {
         // 2. 各フレーズから startTime と endTime を個別に検出
         let lastKnownTime = NaN;
         let prevEndTimeSetter: ((t: number) => void) | null = null;
-        return clauses.map(data => {
+        // 末尾の区切り (スペース / ハイフン混じり) が打鍵対象なら、その文字列を返す。
+        // "I " → " " 、"like - " → " - "。対象外なら "" を返す。
+        // 空フレーズ (タイムタグのみ) は読み飛ばして次の実テキストを見る。
+        const trailingJoin = (ci: number): string => {
+            const text = clauseText(clauses[ci]);
+            // ハイフン単独フレーズ ("- "): 全体をそのまま採点対象にする
+            if (joinWordSet.has(clauses[ci])) {
+                return normalizeJoinChar(text).replace(/ +/g, " ");
+            }
+            if (!isWordSeparatorSpace(text.slice(-1))) return "";
+            const run = text.match(/[\s\-]+$/);
+            if (!run) return "";
+            if (!endsEnglishWord(text.slice(0, text.length - run[0].length))) return "";
+            for (let j = ci + 1; j < clauses.length; j++) {
+                const next = clauseText(clauses[j]);
+                if (next.trim() === "") continue;
+                // 次がハイフン単独フレーズなら英単語と同じ扱い
+                if (joinWordSet.has(clauses[j]) || startsEnglishWord(next)) {
+                    return normalizeJoinChar(run[0]).replace(/ +/g, " ");
+                }
+                return "";
+            }
+            return "";
+        };
+
+        return clauses.map((data, ci) => {
+            const keepTrailingSpace = trailingJoin(ci);
             // 先頭の連続タイムタグを検出
             const leadingMatch = data.match(leadingTagsRegex);
             let startTime = NaN;
@@ -227,21 +299,27 @@ export function parseLyric(lrc: string, replTxt: string) {
                 if (curCount > 0) charGroups.push({ count: curCount, startTime: curTime });
             }
 
-            // 末尾スペースをプログレスバー（火花）の対象から除外する。
+            // 打鍵対象外のスペースをプログレスバー（火花）の対象から除外する。
             // スペースは発音していないためバーが伸びると違和感がある。また count に
             // 含めると、その分だけバー先端が可視文字の末尾で止まる前に「時間」を消費し、
             // スペース比率の高い短いフレーズほど火花が早く終わる原因になる。
-            // 末尾スペースは常に最後のグループに属するので、そのcountから引く。
+            // 併合クローズ ("like - ") では末尾以外にも空白が入るため、タグを除いた
+            // 全空白を数え、打鍵対象の区切り (keepTrailingSpace) に含まれる空白の
+            // 数だけ戻す。超過分は末尾側のグループから順に引く。
             {
-                const trailingWs = clause.length - clause.replace(/[\s　]+$/, "").length;
-                if (trailingWs > 0 && charGroups.length > 0) {
-                    const last = charGroups[charGroups.length - 1];
-                    last.count -= trailingWs;
-                    if (last.count <= 0) charGroups.pop();
+                const plain = data.replace(/\[\d\d:\d\d:\d\d\]/g, "");
+                const wsCount = (plain.match(/[\s　]/g) ?? []).length;
+                let excess =
+                    wsCount - (keepTrailingSpace.match(/ /g)?.length ?? 0);
+                for (let gi = charGroups.length - 1; gi >= 0 && excess > 0; gi--) {
+                    const take = Math.min(excess, charGroups[gi].count);
+                    charGroups[gi].count -= take;
+                    excess -= take;
+                    if (charGroups[gi].count <= 0) charGroups.splice(gi, 1);
                 }
             }
 
-            const result = [startTime, clause, endTime, charGroups] as [number, string, number | undefined, { count: number; startTime: number; endTime?: number }[]];
+            const result = [startTime, clause, endTime, charGroups, keepTrailingSpace] as [number, string, number | undefined, { count: number; startTime: number; endTime?: number }[], string];
             // 次のフレーズが先頭連続タグでendTimeを設定できるようにする
             prevEndTimeSetter = (t: number) => { result[2] = result[2] ?? t; };
             return result;
@@ -262,9 +340,13 @@ export function parseLyric(lrc: string, replTxt: string) {
         return clauseData.map(data => {
             let clause = data[1];
             for (let i = 0; i < replList.length; i++) {
-                clause = fixRuby(clause.replace(new RegExp(replList[i][0], "g"), replList[i][1]));
+                // repl のキーは「文字列そのもの」として置換する。エスケープしないと
+                // 正規表現のメタ文字 (?, *, +, ( ) など) を含むキーで例外になり
+                // 譜面全体が読み込めなくなる。
+                // (例: SJIS 保存で ♡ が "?" に化けたキー "?は不格好" → Nothing to repeat)
+                clause = fixRuby(clause.replace(new RegExp(escapeRegExpLiteral(replList[i][0]), "g"), replList[i][1]));
             }
-            return [data[0], clause, data[2] /* endTime */, data[3] /* charGroups */] as [number, string, number | undefined, { count: number; startTime: number; endTime?: number }[]]
+            return [data[0], clause, data[2] /* endTime */, data[3] /* charGroups */, data[4] /* keepTrailingSpace */] as [number, string, number | undefined, { count: number; startTime: number; endTime?: number }[], string]
         })
     }).map((line, i) => {
         return line.map(phraseData => {
@@ -272,13 +354,15 @@ export function parseLyric(lrc: string, replTxt: string) {
             let phrase = phraseData[1];
             let endTime = phraseData[2];
             let charGroups = phraseData[3];
+            const keepTrailingSpace = phraseData[4];
 
             let segments: { text: string; reading: string; normalizedText: string; normalizedReading: string; explicit: boolean; }[] = [];
             const parts = phrase.split(/(<ruby>[\s\S]*?<\/ruby>)/g);
 
             const buildSegment = (text: string, reading: string, explicit = false) => {
-                const normalizedText = stripUntypeable(text);
-                let tempReading = stripUntypeable(reading);
+                // 英文の半角スペース・' は打鍵対象として残す ("I love you" / "don't")
+                const normalizedText = stripUntypeableChart(text);
+                let tempReading = stripUntypeableChart(reading);
                 tempReading = tempReading.replace(/[\u30a1-\u30f6]/g, match => String.fromCharCode(match.charCodeAt(0) - 0x60));
                 // \uff5e \u306f\u8aad\u307f\u3067\u306f \u30fc\uff08\u9577\u97f3\uff09\u3068\u3057\u3066\u6253\u3066\u308b\u3088\u3046\u6b63\u898f\u5316\uff08\u30bf\u30a4\u30d7\u6642\u306f \uff5e \u3067 text \u30de\u30c3\u30c1\u3001\u30fc \u3067 reading \u30de\u30c3\u30c1\uff09
                 tempReading = tempReading.replace(/[\uff5e\u301c]/g, "\u30fc");
@@ -309,6 +393,15 @@ export function parseLyric(lrc: string, replTxt: string) {
                     splitPlainText(part);
                 }
             });
+
+            // 英単語の区切りスペースを採点対象に戻す。
+            // stripUntypeableChart はセグメント内しか見えず「次に単語が続くか」を
+            // 判断できないため、フレーズ単位で判定した結果をここで反映する。
+            if (keepTrailingSpace !== "" && segments.length > 0) {
+                const last = segments[segments.length - 1];
+                last.normalizedText += keepTrailingSpace;
+                last.normalizedReading += keepTrailingSpace;
+            }
 
             // 2. Create RegExp
             // Escape function for regex special characters

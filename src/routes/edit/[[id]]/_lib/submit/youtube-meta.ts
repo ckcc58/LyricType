@@ -1,5 +1,6 @@
 // YouTube メタデータ取得 + 投稿フォーム自動入力 (behavior: state mutation あり)
 import { submit } from "../../_state/submit.svelte";
+import { LANGUAGE_TAGS, syncLanguageTag } from "./language-tag";
 
 /**
  * `submit.ytVideoId` から YouTube メタデータを取得し、投稿フォームを自動入力する。
@@ -31,14 +32,6 @@ export async function autoFillFromYouTube(): Promise<void> {
     if (result.isCover && !result.isMAD) priorityTags.push("カバー");
     if (result.isMAD) priorityTags.push("MAD");
 
-    // 言語タグ (特別枠: 通常枠の上限に関係なく追加)
-    const langTag: string | null =
-      result.songLanguage === "en"
-        ? "英語"
-        : result.songLanguage === "en-ja"
-          ? "英語&日本語"
-          : null;
-
     // title/artist/source に含まれる語句を後回しにしてソート
     const knownStrings = [result.title, result.artist, result.source]
       .filter(Boolean)
@@ -47,10 +40,13 @@ export async function autoFillFromYouTube(): Promise<void> {
       const t = tag.toLowerCase();
       return knownStrings.some((s: string) => s.includes(t) || t.includes(s));
     };
-    const sorted = [...(result.suggestedTags ?? [])].sort(
-      (a: string, b: string) =>
-        (isRedundant(a) ? 1 : 0) - (isRedundant(b) ? 1 : 0),
-    );
+    // 言語タグはコード側の管轄なので、AI が挙げてきても候補から外す
+    const sorted = [...(result.suggestedTags ?? [])]
+      .filter((t: string) => !LANGUAGE_TAGS.includes(t))
+      .sort(
+        (a: string, b: string) =>
+          (isRedundant(a) ? 1 : 0) - (isRedundant(b) ? 1 : 0),
+      );
 
     // 通常枠: 優先タグ + otherTags で最大3件
     const autoTags: string[] = [...priorityTags];
@@ -59,10 +55,10 @@ export async function autoFillFromYouTube(): Promise<void> {
       if (!autoTags.includes(t)) autoTags.push(t);
     }
 
-    // 言語タグを特別枠として追加
-    if (langTag && !autoTags.includes(langTag)) autoTags.push(langTag);
-
-    submit.tags = autoTags;
+    // 言語タグ (特別枠: 通常枠の上限に関係なく追加)。
+    // 動画情報からの推定ではなく歌詞から判定した現在値を引き継ぐ
+    // (タグ列を丸ごと入れ替えるので、ここで入れ直さないと消えてしまう)
+    submit.tags = syncLanguageTag(autoTags, submit.lastLanguageTag);
     submit.suggestedTags = sorted.filter((t: string) => !autoTags.includes(t));
   } catch {
     submit.autoFillError = "通信エラーが発生しました";

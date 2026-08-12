@@ -81,6 +81,11 @@
     chart.lrcContent = tt.lrcText;
   }
 
+  /** ヘッダ/フッタの行数表示 (空なら「なし」) */
+  function metaLineCount(text: string): string {
+    return text.trim() ? `${text.trim().split("\n").length}行` : "なし";
+  }
+
   function handleLrcInput(): void {
     chart.lrcContent = tt.lrcText;
     if (
@@ -105,12 +110,14 @@
 
 <div class="lrcEditorContainer">
   <div class="lrcToolbar">
-    <button class="ttBtn ttExportBtn" onclick={downloadLrc}>
-      LRCエクスポート
-    </button>
-    <button class="ttBtn ttImportBtn" onclick={() => openImport("lrc")}>
-      LRCインポート
-    </button>
+    <div class="lrcFileControls">
+      <button class="ttBtn ttExportBtn" onclick={downloadLrc}>
+        LRCエクスポート
+      </button>
+      <button class="ttBtn ttImportBtn" onclick={() => openImport("lrc")}>
+        LRCインポート
+      </button>
+    </div>
     <div class="lrcFindBar">
       <input
         class="lrcFindInput"
@@ -179,6 +186,16 @@
       >
     </div>
   </div>
+  <details class="metaPreview">
+    <summary>ヘッダ - {metaLineCount(chart.lrcHeader)}</summary>
+    <!-- 保存時に本体の前へそのまま出力される。@ytid は保存時に自動で更新/追加される -->
+    <textarea
+      class="metaEdit"
+      bind:value={chart.lrcHeader}
+      spellcheck="false"
+      placeholder={'@ytid="..." や [ti:曲名] などのメタ情報'}
+    ></textarea>
+  </details>
   <div class="lrcEditorBody">
     <textarea
       class="ttTextEditor"
@@ -219,9 +236,52 @@
       </button>
     </div>
   </div>
+  <details class="metaPreview">
+    <summary>フッタ - {metaLineCount(chart.lrcFooter)}</summary>
+    <!-- 保存時に本体の後ろへそのまま出力される -->
+    <textarea
+      class="metaEdit"
+      bind:value={chart.lrcFooter}
+      spellcheck="false"
+      placeholder="本体の後ろに出力するメタ情報"
+    ></textarea>
+  </details>
 </div>
 
 <style>
+  /* ヘッダ/フッタ (メタ情報) のプレビュー。編集不可・保存時にそのまま復元される */
+  .metaPreview {
+    flex-shrink: 0;
+    background: #14161a;
+    border-bottom: 1px solid #2a2d33;
+    font-size: 11px;
+  }
+  .metaPreview summary {
+    padding: 4px 12px;
+    color: #9aa4b0;
+    cursor: pointer;
+    user-select: none;
+  }
+  .metaEdit {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 48px;
+    max-height: 120px;
+    resize: vertical;
+    /* 展開時に上下の余白を作らない (左右のみ) */
+    padding: 0 12px;
+    border: none;
+    outline: none;
+    background: #0f1114;
+    color: #c8ccd2;
+    font-family: monospace;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .metaEdit::placeholder {
+    color: #6d757e;
+  }
   .lrcEditorContainer {
     flex: 1;
     min-height: 0;
@@ -239,6 +299,12 @@
     flex-shrink: 0;
     flex-wrap: nowrap;
     overflow-x: auto;
+  }
+  .lrcFileControls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
   }
   .lrcFindBar {
     display: flex;

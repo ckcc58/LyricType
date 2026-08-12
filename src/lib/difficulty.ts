@@ -35,7 +35,15 @@ function stripRuby(text: string): string {
 		.replace(/<\/?ruby[^>]*>/gi, '');
 }
 
-export function calcDifficulty(lyric: ChartDataJSON['lyric']): DifficultyResult {
+/**
+ * @param songDurationSec 実際の曲の長さ (秒)。ゲームでは最終5行は後続行に押し出されず
+ *   「曲が終わる + grace」まで打てるため、後奏が長い曲で歌詞末尾基準の打ち切りを使うと
+ *   最終行群の CPM が過大評価される (捏造ピーク)。未指定時は従来通り歌詞末尾で近似する。
+ */
+export function calcDifficulty(
+	lyric: ChartDataJSON['lyric'],
+	songDurationSec?: number
+): DifficultyResult {
 	// === Step A: フレーズ列を構築 ===
 	// chars は「読み文字数」基準で数える（漢字 1 文字 = 読みのひらがな分の打鍵負荷）
 	type Phrase = { start: number; lineNo: number; chars: number; text: string };
@@ -88,7 +96,14 @@ export function calcDifficulty(lyric: ChartDataJSON['lyric']): DifficultyResult 
 	// === Step D: 各行の displayEnd を 5行キュー方式で計算 ===
 	const DISPLAY_LINES = 5;
 	const GRACE_DURATION = 5;
-	const lastDisplayEnd = lines.length > 0 ? lines[lines.length - 1].lineEnd + GRACE_DURATION : 0;
+	// 最終グループの打ち切り: 実曲長があれば「曲の終わり + grace」(ゲームの実挙動)。
+	// 歌詞末尾より曲が短い異常データは max で歌詞末尾を下限にする。
+	const lyricEnd = lines.length > 0 ? lines[lines.length - 1].lineEnd : 0;
+	const screenEnd =
+		songDurationSec !== undefined && songDurationSec > 0
+			? Math.max(lyricEnd, songDurationSec)
+			: lyricEnd;
+	const lastDisplayEnd = lines.length > 0 ? screenEnd + GRACE_DURATION : 0;
 	const lineDisplayEndMap = new Map<number, number>();
 	for (let k = 0; k < lines.length; k++) {
 		const pushedBy = lines[k + DISPLAY_LINES];

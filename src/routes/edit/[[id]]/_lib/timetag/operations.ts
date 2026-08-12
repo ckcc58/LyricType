@@ -11,6 +11,14 @@ export function ttRecordOp(op: UndoOp): void {
   tt.redoStack = [];
 }
 
+/** 現在の tt.lines 全体を snapshot として記録 (blockTime 変更など UndoOp で
+ *  表現できない複合変更の直前に呼ぶ。1回の Undo で全て戻る)。 */
+export function ttRecordSnapshot(): void {
+  tt.undoStack.push({ type: "snapshot", data: JSON.stringify(tt.lines) });
+  if (tt.undoStack.length > 10000) tt.undoStack.shift();
+  tt.redoStack = [];
+}
+
 /** UndoOp を tt.lines に対して適用する (undo/redo どちら方向にも対応) */
 export function applyOp(op: UndoOp, dir: "undo" | "redo"): void {
   const ch = tt.lines[op.li]?.chars[op.ci];

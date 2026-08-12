@@ -104,17 +104,31 @@ export function closeRubyEdit(): void {
 export function applyRubyEdit(buildTimeTagLines: () => void): void {
   if (tt.rubyEditLine < 0 || !tt.rubyEditKey || !tt.rubyEditValue.trim()) return;
   tt.rubyEditValue = tt.rubyEditValue.replace(/｜/g, "|").replace(/＋/g, "+");
-  const oldEntry = tt.rubyEditOrigKey + ",";
-  const lines = chart.chartReplContent.trim().split("\n");
-  let replaced = false;
-  const newLines = lines.map((line) => {
-    if (line.startsWith(oldEntry)) {
-      replaced = true;
-      return tt.rubyEditKey + "," + tt.rubyEditValue;
-    }
-    return line;
-  });
-  if (!replaced) newLines.push(tt.rubyEditKey + "," + tt.rubyEditValue);
+  const lines = chart.chartReplContent.trim().split("\n").filter((l) => l);
+  const newEntry = tt.rubyEditKey + "," + tt.rubyEditValue;
+  const keyChanged = tt.rubyEditKey !== tt.rubyEditOrigKey;
+
+  let newLines: string[];
+  if (keyChanged) {
+    // キー範囲を変えた場合は「別のエントリを新しく作る」操作とみなし、元のエントリは残す。
+    // (例:「時間,じ|かん」を開いて Ctrl+→ で「時間違」に広げた時、歌詞に単独の「時間」が
+    //  あれば両方必要。元を置き換えると片方が失われる)
+    // 不要になった元エントリは最適化 (長いキーに包含され他に出現しないものを除去) が消す。
+    const sameKey = tt.rubyEditKey + ",";
+    newLines = lines.filter((l) => !l.startsWith(sameKey));
+    newLines.push(newEntry);
+  } else {
+    // 同じキーの読みを直しただけ: 従来どおり置換する
+    let replaced = false;
+    newLines = lines.map((line) => {
+      if (line.startsWith(tt.rubyEditOrigKey + ",")) {
+        replaced = true;
+        return newEntry;
+      }
+      return line;
+    });
+    if (!replaced) newLines.push(newEntry);
+  }
   const rawRepl = newLines.join("\n");
 
   // repl 最適化を実行してから ttLines に反映

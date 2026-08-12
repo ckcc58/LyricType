@@ -6,12 +6,20 @@ export const SETTINGS_STORAGE_KEY = "lyrictype-settings";
 export type Settings = {
   volume: number;
   timeOffset: number;
+  /** ゲームの歌詞表示タイミング補正 (秒)。正で遅く、負で早く表示する。
+   *  曲長を超える値を許すと歌詞が一切出ないまま曲が終わるため範囲を制限する。 */
+  lyricDelay: number;
   fontFamily: string;
 };
+
+/** lyricDelay の許容範囲 (秒) */
+export const LYRIC_DELAY_MIN = -1;
+export const LYRIC_DELAY_MAX = 1;
 
 export const DEFAULT_SETTINGS: Settings = {
   volume: 70,
   timeOffset: 0,
+  lyricDelay: 0,
   fontFamily: DEFAULT_FONT_ID,
 };
 
@@ -28,6 +36,10 @@ export function normalizeSettings(value: unknown): Settings {
     timeOffset: typeof input.timeOffset === "number" && Number.isFinite(input.timeOffset)
       ? input.timeOffset
       : DEFAULT_SETTINGS.timeOffset,
+    // 範囲外の値は丸める (曲長を超える遅延で歌詞が出なくなるのを防ぐ)
+    lyricDelay: typeof input.lyricDelay === "number" && Number.isFinite(input.lyricDelay)
+      ? Math.min(LYRIC_DELAY_MAX, Math.max(LYRIC_DELAY_MIN, input.lyricDelay))
+      : DEFAULT_SETTINGS.lyricDelay,
     fontFamily: isValidFontId(input.fontFamily) ? input.fontFamily : DEFAULT_SETTINGS.fontFamily,
   };
 }

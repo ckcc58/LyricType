@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import WaveformWorker from "$lib/waveform-worker?worker";
   import {
     parseLyric,
@@ -25,6 +25,7 @@
     adjustTagTime,
   } from "$lib/parseLyric/timetag-operations";
   import { settings, updateSetting } from "$lib/settings";
+  import { pendingChartFolder } from "../../../store";
   import { get } from "svelte/store";
   import { page } from "$app/stores";
   import { afterNavigate, beforeNavigate } from "$app/navigation";
@@ -62,12 +63,20 @@
   } from "./_lib/latency/measure";
   import { getLrcForSave } from "./_lib/lrc/serialize";
   import {
+    normalizeLrcTimeTags,
+    splitLrcSections,
+  } from "./_lib/lrc/normalize";
+  import {
     downloadChartRepl,
     downloadTtLrc,
     saveChartFolder,
     copyYtypingJson,
   } from "./_lib/io/save-files";
   import { autoFillFromYouTube } from "./_lib/submit/youtube-meta";
+  import {
+    detectLanguageTag,
+    syncLanguageTag,
+  } from "./_lib/submit/language-tag";
   import {
     addTag,
     removeTag,
@@ -86,6 +95,7 @@
   // buildKaraokeUnits / ttCharProgress / KaraokeUnit は TimeTagTab に閉じている
   import {
     ttRecordOp,
+    ttRecordSnapshot,
     applyOp,
     ttUndo as ttUndoCore,
     ttRedo as ttRedoCore,
@@ -219,8 +229,10 @@
     submit.description = "";
     submit.ytVideoId = "";
     submit.source = "";
+    submit.previewTime = "";
     submit.tags = [];
     submit.tagInput = "";
+    submit.lastLanguageTag = null;
     submit.isSubmitting = false;
     submit.submitError = "";
     submit.submittedChartId = null;
@@ -233,6 +245,8 @@
 
     chart.lrcContent = "";
     chart.lrcYtId = "";
+    chart.lrcHeader = "";
+    chart.lrcFooter = "";
     chart.lrcFindText = "";
     chart.lrcReplaceText = "";
     chart.lrcFindCase = false;
@@ -575,6 +589,44 @@
     player.waveformZoom = next ?? WAVEFORM_ZOOM_MAX;
   }
 
+  // 波形上のホイール操作:
+  //   上下スクロール = 0.1s 刻みのズーム (上=拡大 / 下=縮小)
+  //   左右スクロール (トラックパッド/チルトホイール/Shift+ホイール) = 横移動
+  // 窓は再生ヘッド中心固定のため、横移動 = 再生位置のシークとして実装する。
+  // ページスクロールを確実に抑止するため non-passive リスナーを明示する svelte action。
+  function waveformWheelZoom(node: HTMLElement) {
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      // 横成分の判定: deltaX 優勢ならそれを、Shift+縦ホイールも横として扱う
+      const horiz =
+        Math.abs(e.deltaX) > Math.abs(e.deltaY)
+          ? e.deltaX
+          : e.shiftKey
+            ? e.deltaY
+            : 0;
+      if (horiz !== 0) {
+        // 1ノッチ(≈100) で表示窓の 10% 移動。ズームに比例するので拡大時は細かく動く
+        const seconds = (horiz / 100) * player.waveformZoom * 0.1;
+        const target = Math.max(
+          0,
+          Math.min(player.audioDuration || 0, tt.displayTime + seconds),
+        );
+        playerSeek(target);
+        return;
+      }
+      const delta = e.deltaY < 0 ? -0.1 : 0.1;
+      player.waveformZoom =
+        Math.round(
+          Math.min(
+            WAVEFORM_ZOOM_MAX,
+            Math.max(WAVEFORM_ZOOM_MIN, player.waveformZoom + delta),
+          ) * 10,
+        ) / 10;
+    };
+    node.addEventListener("wheel", handler, { passive: false });
+    return { destroy: () => node.removeEventListener("wheel", handler) };
+  }
+
   // 遅延測定は ./_lib/latency/measure に移動済み
 
   // Derived
@@ -653,6 +705,23 @@
       });
     });
     return Array.from(uniqueMap.values());
+  });
+
+  // 言語タグ (英語 / 英語&日本語) の自動判定。
+  // 譜面ロード・LRC 編集・タイムタグ再生成のいずれでも歌詞が変われば走る。
+  // 判定結果が前回と変わったときだけタグを付け替えるので、
+  // 結果が同じままなら手動で付けたり外したりした状態がそのまま残る。
+  $effect(() => {
+    // どちらが更新されても走るよう両方読む (|| だと短絡して片方が追跡されない)
+    const editing = tt.lrcText;
+    const loaded = chart.lrcContent;
+    const langTag = detectLanguageTag(editing || loaded);
+    untrack(() => {
+      if (langTag === submit.lastLanguageTag) return;
+      submit.lastLanguageTag = langTag;
+      const next = syncLanguageTag(submit.tags, langTag);
+      if (next !== submit.tags) submit.tags = next;
+    });
   });
 
   // Needs Pipe Logics ($state は chart.svelte.ts)
@@ -876,6 +945,9 @@
       handleLatencyKeydown(e);
       return;
     }
+    // メディアソース選択ダイアログ表示中は、その中のキー操作に専念させる
+    // (矢印キーでカーソルが動く・Space でタグが付く等の暴発を防ぐ)
+    if (player.showSourceDialog) return;
     handleTtKeydown(e);
     // 再生関係ショートカットは全タブ・全フォーカスで有効にする。
     // TimeTag タブ表示中は handleTtKeydown が既に処理済みなので二重実行を避ける。
@@ -994,14 +1066,22 @@
   });
 
   let lastLoadedChartId: number | null = null;
+  // afterNavigate の resetEditorState() が終わるまで、外部から渡された譜面フォルダを
+  // 読み込まないためのフラグ。先に読み込むとリセットで消されて空のエディタになる。
+  let navSettled = $state(false);
   afterNavigate(() => {
     const editChart = get(page).data?.editChart;
     if (!editChart) {
       resetEditorState();
+      navSettled = true;
       return;
     }
-    if (editChart.id === lastLoadedChartId) return;
+    if (editChart.id === lastLoadedChartId) {
+      navSettled = true;
+      return;
+    }
     resetEditorState();
+    navSettled = true;
     lastLoadedChartId = editChart.id;
     submit.editingChartId = editChart.id;
     submit.editingUploaderId = editChart.uploader_id;
@@ -1010,9 +1090,12 @@
     const rawLrc = editChart.lrc_raw || "";
     const ytMatch = rawLrc.match(/^@ytid="([^"]+)"/m);
     if (ytMatch) chart.lrcYtId = ytMatch[1];
-    const cleanLrc = rawLrc.replace(/^@\w+=.*$/gm, "").trim();
-    chart.lrcContent = cleanLrc;
-    tt.lrcText = cleanLrc;
+    // DB の lrc_raw も本体前後 (通常は @ytid 行のみ) をヘッダ/フッタとして保持
+    const dbSections = splitLrcSections(rawLrc);
+    chart.lrcHeader = dbSections.header;
+    chart.lrcFooter = dbSections.footer;
+    chart.lrcContent = dbSections.body;
+    tt.lrcText = dbSections.body;
     chart.chartReplContent = editChart.repl_raw || "";
     chart.appliedChartReplContent = editChart.repl_raw || "";
     submit.loadedTitle = editChart.title || "";
@@ -1021,14 +1104,19 @@
     submit.description = editChart.description || "";
     submit.ytVideoId = editChart.youtube_video_id || "";
     submit.source = editChart.source || "";
+    submit.previewTime =
+      editChart.preview_time != null ? String(editChart.preview_time) : "";
     submit.tags = editChart.tags ?? [];
-    tick().then(() => {
+    tick().then(async () => {
       buildTimeTagLines();
-      autoGenerateRepl();
+      // autoGenerateRepl は master repl の取得 (+ Gemini 補完) を待つ非同期処理で、
+      // 完了時に chart.chartReplContent を最適化後の内容へ書き換える。
+      // await せずにスナップショットを撮ると、その書き換えが「ユーザーの変更」と
+      // 見なされ、何もしていないのに離脱警告が出てしまう。
+      await autoGenerateRepl();
+      await tick();
       // 譜面ロード完了後にスナップショットを記録 (この時点を「保存済み」とする)
-      tick().then(() => {
-        submit.lastSavedSnapshot = buildSubmitSnapshot();
-      });
+      submit.lastSavedSnapshot = buildSubmitSnapshot();
     });
 
     if (editChart.youtube_video_id) {
@@ -1444,7 +1532,16 @@
 
   // selectEditorSource は ./_components/SourceDialog.svelte に移動済み
 
-  async function loadFromFiles(files: File[], title: string) {
+  /** @param dirHandle 読み込み元フォルダのハンドル (保存先になる)。
+   *    null = フォルダ由来でないので保存先をクリア、
+   *    undefined = 現在の保存先を維持 (単体ファイルのインポート時)。 */
+  async function loadFromFiles(
+    files: File[],
+    title: string,
+    dirHandle?: FileSystemDirectoryHandle | null,
+  ) {
+    // 保存先が前の譜面フォルダを指したままにならないよう、読み込みの度に更新する
+    if (dirHandle !== undefined) ui.lastFolderHandle = dirHandle;
     const loadVersion = ++editorStateVersion;
     const isCurrentLoad = () => loadVersion === editorStateVersion;
     const sources: {
@@ -1468,8 +1565,10 @@
       const imageFile = files.find((f) => f.type.startsWith("image/"));
       const replTxtFile = files.find((f) => f.name.endsWith(".repl.txt"));
 
-      // LRC から @ytid 抽出
-      const lrcRaw = lrcFile ? await readFileAsText(lrcFile) : "";
+      // LRC 読み込み: 外部方言のタイムタグを本形式へ正規化してから処理する
+      const lrcRaw = lrcFile
+        ? normalizeLrcTimeTags(await readFileAsText(lrcFile))
+        : "";
       if (!isCurrentLoad()) return;
       const ytidMatch = lrcRaw.match(/@ytid=["']?([A-Za-z0-9_-]{11})["']?/);
       const lrcYtVideoId = ytidMatch ? ytidMatch[1] : undefined;
@@ -1554,6 +1653,7 @@
         submit.artist = "";
         submit.description = "";
         submit.source = "";
+        submit.previewTime = "";
         submit.tags = [];
         submit.ytVideoId = chart.lrcYtId || "";
         submit.submittedChartId = null;
@@ -1561,13 +1661,13 @@
         submit.lastAutoFilledId = "";
         submit.suggestedTags = [];
 
-        // @タグ行を除去してからLRCテキストを取得
-        const lrcClean = lrcRaw.replace(/^@\w+=.*$/gm, "").trim();
-
-        // 最初のタイムタグ〜最後のタイムタグの範囲だけ抽出
-        const text =
-          lrcClean.match(/\[\d\d:\d\d:\d\d\][\s\S]*\[\d\d:\d\d:\d\d\]/)?.[0] ||
-          lrcClean;
+        // 本体 (最初のタグ〜最後のタグ) の前後はメタ情報 (@Ruby / [ti:] /
+        // クレジット行等) を含み得るため、無解釈でヘッダ/フッタとして保持し
+        // 保存時にそのまま復元する (@行の削除は行わない)
+        const sections = splitLrcSections(lrcRaw);
+        chart.lrcHeader = sections.header;
+        chart.lrcFooter = sections.footer;
+        const text = sections.body;
         chart.lrcContent = text;
 
         let existingRepl = "";
@@ -1649,7 +1749,8 @@
     const files = Array.from(e.currentTarget.files);
     const title =
       files[0]?.webkitRelativePath.split("/")[0] || files[0]?.name || "";
-    await loadFromFiles(files, title);
+    // <input webkitdirectory> ではハンドルが取れないため保存先はクリアする
+    await loadFromFiles(files, title, null);
   }
 
   async function openFolder() {
@@ -1663,7 +1764,7 @@
       (chart.lrcContent.trim() || chart.chartReplContent.trim())
     ) {
       const ok = confirm(
-        "既存データを譜面フォルダで上書きしますか？\nLRC・Repl の現在の内容が置き換えられます。",
+        "既存データを譜面フォルダで上書きしますか？",
       );
       if (!ok) return;
     }
@@ -1672,7 +1773,6 @@
       try {
         const dirHandle: FileSystemDirectoryHandle =
           await window.showDirectoryPicker();
-        ui.lastFolderHandle = dirHandle;
         const files: File[] = [];
         // @ts-ignore - async iterator on FileSystemDirectoryHandle
         for await (const [, entry] of dirHandle) {
@@ -1686,7 +1786,7 @@
             }
           }
         }
-        await loadFromFiles(files, dirHandle.name);
+        await loadFromFiles(files, dirHandle.name, dirHandle);
         return;
       } catch (e: unknown) {
         if (e instanceof Error && e.name === "AbortError") return;
@@ -1695,6 +1795,18 @@
     // フォールバック: 隠しinputをクリック
     folderInputRef?.click();
   }
+
+  // 他画面 (ホームのドロップ / ローカルプレイの Edit) から渡された譜面フォルダを読み込む。
+  // master repl のロード完了と、afterNavigate のリセット完了の両方を待つ必要があるため
+  // $effect で監視する。
+  $effect(() => {
+    const pending = $pendingChartFolder;
+    if (!pending || !chart.isMasterLoaded || !navSettled) return;
+    pendingChartFolder.set(null); // 一度だけ消費する
+    // 読み込み元フォルダのハンドルをそのまま保存先として引き継ぐ
+    // (ドロップ / showDirectoryPicker 経由でのみ取れる。<input webkitdirectory> では null)
+    loadFromFiles(pending.files, pending.name, pending.dirHandle ?? null);
+  });
 
   // フォルダ選択用 隠しinput (DOM ref)
   let folderInputRef: HTMLInputElement | undefined = $state();
@@ -1712,7 +1824,7 @@
     }
     if (kind === "lrc" && chart.lrcContent.trim()) {
       const ok = confirm(
-        "現在のLRCをインポートしたファイルで上書きしますか？\nRepl・タイムタグも再生成されます。",
+        "現在のLRCを上書きしますか？\nRepl・タイムタグも再生成されます。",
       );
       if (!ok) return;
     }
@@ -1815,17 +1927,18 @@
       return;
     }
     let dirEntry: FileSystemDirectoryEntry | null = null;
+    let dirHandle: FileSystemDirectoryHandle | null = null;
     for (const item of Array.from(e.dataTransfer.items)) {
       const entry = item.webkitGetAsEntry();
       if (entry?.isDirectory) {
         dirEntry = entry as FileSystemDirectoryEntry;
-        // FileSystemDirectoryHandle を保存（Save As で startIn に使う）
+        // ドロップ元フォルダのハンドル。取れればそこへ直接保存できる
         if ("getAsFileSystemHandle" in item) {
           try {
             // @ts-ignore - File System Access API
             const handle = await item.getAsFileSystemHandle();
             if (handle?.kind === "directory") {
-              ui.lastFolderHandle = handle as FileSystemDirectoryHandle;
+              dirHandle = handle as FileSystemDirectoryHandle;
             }
           } catch {
             /* unsupported browser */
@@ -1839,7 +1952,7 @@
       return;
     }
     const files = await readAllEntries(dirEntry);
-    await loadFromFiles(files, dirEntry.name);
+    await loadFromFiles(files, dirEntry.name, dirHandle);
   }
 
   // === Player Abstraction ===
@@ -1952,6 +2065,7 @@
     submit.title = "";
     submit.artist = "";
     submit.source = "";
+    submit.previewTime = "";
     submit.tags = [];
     submit.suggestedTags = [];
     submit.lastAutoFilledId = "";
@@ -2084,6 +2198,23 @@
     return playerGetTime();
   }
 
+  /**
+   * 打鍵時刻から遅延補正を差し引いた「タグに記録する時刻」を返す。
+   *
+   * timeOffset は遅延測定 (setInterval + performance.now) で得た **実時間** の値だが、
+   * ttCurrentTime() が返すのは **曲の再生位置 (メディア時間)** で単位系が異なる。
+   * 再生速度 r のとき、実時間 L の遅延の間に曲は L×r 秒進むため、
+   * メディア時間で差し引くべき量は timeOffset × r になる。
+   *
+   * 補正しないと残差は L(r−1) となり、
+   *   2.0x → 補正量がそのまま誤差として残る (実質無補正)
+   *   0.5x → 引きすぎて逆に早まる
+   * という挙動になる。r = 1 では従来と同値。
+   */
+  function ttStampTime(): number {
+    return ttCurrentTime() - $settings.timeOffset * tt.playbackRate;
+  }
+
   // buildKaraokeUnits / ttCharProgress は ./_lib/timetag/karaoke から import 済み
   // formatTime / ttIsSpace / ttEndCheckActive / applyTtCursor / ttLineEndActive
   //   / ttIsOnEndCheck / ttEndCheckTime は ./_lib/timetag/utils から import 済み
@@ -2116,7 +2247,7 @@
       line: tt.lastTaggedLine,
       char: tt.lastTaggedChar,
     };
-    const endT = ttCurrentTime() - $settings.timeOffset;
+    const endT = ttStampTime();
     const endResult = setEndTime(tt.lines, lastTagged, endT);
     if (endResult) {
       ttRecordOp({ type: 'setEndTime', li: endResult.li, ci: endResult.ci, prev: endResult.prevEndTime, next: endT });
@@ -2141,7 +2272,7 @@
       for (let i = tt.pendingEndCheckChar; i < lineChars.length; i++) {
         if (i > tt.pendingEndCheckChar && lineChars[i].checkCount > 0) break;
         if (lineChars[i].isEndCheck) {
-          lineChars[i].endTime = ttCurrentTime() - $settings.timeOffset;
+          lineChars[i].endTime = ttStampTime();
           found = true;
         }
       }
@@ -2174,7 +2305,7 @@
     }
 
     let found = false;
-    const endT = ttCurrentTime() - $settings.timeOffset;
+    const endT = ttStampTime();
     const prevEnds: (number | null)[] = [];
     for (let i = tt.pendingEndCheckChar; i < lineChars.length; i++) {
       if (i > tt.pendingEndCheckChar && lineChars[i].checkCount > 0) break;
@@ -2227,6 +2358,8 @@
             else secondary.push(ch.times[i]!);
           }
         }
+        // checkCount=0 文字が保持するタグ (blockTime) も主タグとして表示する
+        if (ch.blockTime !== undefined) primary.push(ch.blockTime);
         if (ch.endTime !== null) ends.push(ch.endTime);
       }
     }
@@ -2288,6 +2421,14 @@
     }
   }
 
+  // タイムタグエディタ上の一時通知 (2 秒で自動的に消す)
+  let ttStatusTimer: ReturnType<typeof setTimeout> | undefined;
+  function showTtStatus(msg: string): void {
+    tt.statusMsg = msg;
+    clearTimeout(ttStatusTimer);
+    ttStatusTimer = setTimeout(() => (tt.statusMsg = ""), 2000);
+  }
+
   function handleTtKeydown(e: KeyboardEvent) {
     if (ui.activeTab !== "timetag" || tt.editorMode !== "timetag") return;
 
@@ -2309,7 +2450,8 @@
               t = ttEndCheckTime();
             } else {
               const ch = tt.lines[tt.cursorLine]?.chars[tt.cursorChar];
-              t = ch?.times[tt.cursorCheck] ?? ch?.times[0] ?? null;
+              // チェックなし文字 (checkCount=0) でも blockTime のタグがあればそこから再生
+              t = ch?.times[tt.cursorCheck] ?? ch?.times[0] ?? ch?.blockTime ?? null;
             }
           }
           if (Number.isFinite(t as number)) {
@@ -2323,13 +2465,19 @@
               const startCi =
                 li === tt.cursorLine ? tt.cursorChar - 1 : line.chars.length - 1;
               for (let ci = startCi; ci >= 0; ci--) {
-                const times = line.chars[ci]?.times;
+                const chPrev = line.chars[ci];
+                const times = chPrev?.times;
                 if (
                   times &&
                   times.length > 0 &&
                   Number.isFinite(times[times.length - 1])
                 ) {
                   prevT = times[times.length - 1];
+                  break outer;
+                }
+                // チェックなし文字のタグ (blockTime) も再生起点として拾う
+                if (Number.isFinite(chPrev?.blockTime as number)) {
+                  prevT = chPrev!.blockTime!;
                   break outer;
                 }
               }
@@ -2342,6 +2490,21 @@
           }
         }
         return;
+      case "KeyP": {
+        // フォーカス文字のタイムタグをプレビュー開始位置に設定する。
+        // タグが無い文字では何もしない (0 秒で上書きしてしまわないため)。
+        e.preventDefault();
+        const ch = tt.lines[tt.cursorLine]?.chars[tt.cursorChar];
+        const t =
+          ch?.times[tt.cursorCheck] ?? ch?.times[0] ?? ch?.blockTime ?? null;
+        if (t !== null && Number.isFinite(t)) {
+          submit.previewTime = (Math.round(t * 100) / 100).toFixed(2);
+          showTtStatus(`プレビュー開始位置を ${submit.previewTime} 秒に設定`);
+        } else {
+          showTtStatus("この文字にはタイムタグがありません");
+        }
+        return;
+      }
       case "KeyS":
         e.preventDefault();
         playerStop();
@@ -2539,7 +2702,7 @@
           const prevChar = tt.lines[tt.cursorLine]?.chars[tt.cursorChar - 1];
           if (prevChar?.isEndCheck) {
             const prevE = prevChar.endTime;
-            const newE = ttCurrentTime() - $settings.timeOffset;
+            const newE = ttStampTime();
             ttRecordOp({ type: 'setEndTime', li: tt.cursorLine, ci: tt.cursorChar - 1, prev: prevE, next: newE });
             prevChar.endTime = newE;
             tt.lines = [...tt.lines];
@@ -2548,13 +2711,41 @@
           return;
         }
         flushPendingEndCheck();
-        const stampTime = ttCurrentTime() - $settings.timeOffset;
+        const stampTime = ttStampTime();
         const ki = cursor.check;
         const ch0 = tt.lines[cursor.line]?.chars[cursor.char];
         const prevT = ch0?.times[ki] ?? null;
+        // タグを打ち直す文字の周辺 (同一タイミンググループ = フレーズ区切りや次の
+        // チェック文字までの checkCount=0 連続域 + 自分自身) に残る旧タグ (blockTime)
+        // を掃除する。放置すると [新]記号[旧]文字 のようにタグが重複して出力される。
+        const staleBlockIdxs: number[] = [];
+        if (ki === 0) {
+          const lineChars = tt.lines[cursor.line]?.chars ?? [];
+          if (lineChars[cursor.char]?.blockTime !== undefined) {
+            staleBlockIdxs.push(cursor.char);
+          }
+          for (let i = cursor.char + 1; i < lineChars.length; i++) {
+            const c = lineChars[i];
+            if (/[\s　、。]/.test(c.char) || c.checkCount > 0) break;
+            if (c.blockTime !== undefined) staleBlockIdxs.push(i);
+          }
+          for (let i = cursor.char - 1; i >= 0; i--) {
+            const c = lineChars[i];
+            if (/[\s　、。]/.test(c.char) || c.checkCount > 0) break;
+            if (c.blockTime !== undefined) staleBlockIdxs.push(i);
+          }
+        }
+        // blockTime の変更は setTime op で表現できないため snapshot で undo する
+        if (staleBlockIdxs.length > 0) ttRecordSnapshot();
         const result = tagCurrentCheck(tt.lines, cursor, stampTime, 0);
         if (result) {
-          ttRecordOp({ type: 'setTime', li: cursor.line, ci: cursor.char, ki, prev: prevT, next: ch0?.times[ki] ?? null });
+          if (staleBlockIdxs.length > 0) {
+            for (const i of staleBlockIdxs) {
+              tt.lines[cursor.line].chars[i].blockTime = undefined;
+            }
+          } else {
+            ttRecordOp({ type: 'setTime', li: cursor.line, ci: cursor.char, ki, prev: prevT, next: ch0?.times[ki] ?? null });
+          }
           applyTtCursor(result.cursor);
           tt.lastTaggedLine = result.lastTagged.line;
           tt.lastTaggedChar = result.lastTagged.char;
@@ -2742,6 +2933,9 @@
             /></svg
           >
           <span>譜面フォルダを開く</span>
+          <span class="videoPlaceholderHint"
+            >ドロップ or クリックして選択</span
+          >
         </button>
       {/if}
     </div>
@@ -2766,6 +2960,11 @@
           <SubmitForm
             {loadYouTubeFromSubmitId}
             {ttRegenCb}
+            getPlayerTime={playerGetTime}
+            seekAndPlay={(sec) => {
+              playerSeek(sec);
+              playerPlay();
+            }}
           />
         {:else if submit.settingsTab === "tools"}
           <ToolsTab
@@ -2849,8 +3048,10 @@
           onclick={(e) =>
             e.ctrlKey || e.metaKey
               ? copyYtypingJson(ttRegenCb)
-              : saveChartFolder(ttRegenCb)}
-          title=".lrc + .repl.txt をフォルダへ保存"
+              : saveChartFolder(ttRegenCb, e.shiftKey)}
+          title={ui.lastFolderHandle
+            ? `「${ui.lastFolderHandle.name}」に上書き保存 (Shift+クリックで保存先を選択)`
+            : ".lrc + .repl.txt をフォルダへ保存"}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -2966,27 +3167,38 @@
             <div class="ttShortcutSection">
               <h4>全般</h4>
               <div><kbd>A</kbd> フォーカス文字から再生</div>
+              <div><kbd>Shift+A</kbd> 曲の先頭から再生</div>
               <div><kbd>S</kbd> 停止</div>
               <div><kbd>D</kbd> 一時停止/再生</div>
-              <div><kbd>Z</kbd>/<kbd>X</kbd> 再生位置±2秒</div>
+              <div><kbd>Z</kbd>/<kbd>X</kbd> 再生位置±2秒（倍速連動）</div>
               <div><kbd>Q</kbd>/<kbd>W</kbd> 再生速度±10%</div>
               <div><kbd>1</kbd>/<kbd>2</kbd> 音量±5</div>
               <div><kbd>Ctrl+Z</kbd>/<kbd>Ctrl+Y</kbd> Undo/Redo</div>
               <div><kbd>Alt+↑</kbd>/<kbd>Alt+↓</kbd> タグ±0.01秒</div>
+              <div><kbd>Shift+↑</kbd>/<kbd>Shift+↓</kbd> 波形ズーム</div>
               <div><kbd>R</kbd> 簡易ルビ編集</div>
+              <div><kbd>P</kbd> フォーカス文字をプレビュー開始位置に設定</div>
             </div>
             <div class="ttShortcutSection">
               <h4>停止中</h4>
-              <div><kbd>Space</kbd>/<kbd>V</kbd>/<kbd>B</kbd>/<kbd>N</kbd> チェック数+1</div>
+              <div>
+                <kbd>Space</kbd>/<kbd>V</kbd>/<kbd>B</kbd>/<kbd>N</kbd>/<kbd>G</kbd>/<kbd
+                  >H</kbd
+                > チェック数+1
+              </div>
               <div><kbd>Backspace</kbd> チェック数-1</div>
               <div><kbd>Delete</kbd> チェック全削除</div>
             </div>
             <div class="ttShortcutSection">
               <h4>再生中</h4>
               <div><kbd>Space</kbd>/<kbd>V</kbd>/<kbd>B</kbd>/<kbd>N</kbd> タイムタグをセット</div>
+              <div>
+                <kbd>G</kbd>/<kbd>H</kbd> タイムタグをセット +
+                キーアップでendTimeをセット
+              </div>
               <div><kbd>長押し→キーアップ</kbd> endTimeをセット</div>
-                            <div><kbd>Enter</kbd> 直前にタグ付けした文字にendTimeをセット</div>
-              <div><kbd>Shift＋Space</kbd> チェック付け</div>
+              <div><kbd>Enter</kbd> 直前にタグ付けした文字にendTimeをセット</div>
+              <div><kbd>Shift＋タグキー</kbd> チェック付け</div>
               <div><kbd>Backspace</kbd> タグ消去（戻る）</div>
               <div><kbd>Delete</kbd> タグ消去</div>
             </div>
@@ -2994,6 +3206,14 @@
               <h4>カーソル</h4>
               <div><kbd>←→</kbd>/<kbd>J</kbd><kbd>L</kbd> 文字移動</div>
               <div><kbd>↑↓</kbd>/<kbd>I</kbd><kbd>K</kbd> 行移動</div>
+            </div>
+            <div class="ttShortcutSection">
+              <h4>マウス</h4>
+              <div>クリック カーソル移動</div>
+              <div>ダブルクリック その文字の時刻へシーク</div>
+              <div><kbd>Ctrl</kbd>+クリック ルビ編集</div>
+              <div>波形上でホイール上下 ズーム±0.1秒</div>
+              <div>波形上でホイール左右 再生位置を移動</div>
             </div>
           </div>
           <button class="ttBtn" onclick={() => (tt.showShortcuts = false)}
@@ -3027,6 +3247,7 @@
             <canvas
               bind:this={waveformCanvas}
               class="waveformCanvasLarge"
+              use:waveformWheelZoom
               onclick={(e) => {
                 const rect = (
                   e.currentTarget as HTMLCanvasElement
@@ -3182,7 +3403,7 @@
   /* 親 (videoArea) と TimeTagTab (空状態) の両方から参照されるため :global */
   :global {
     .videoPlaceholder {
-      color: #666;
+      color: #aaa;
       font-size: 64px;
       user-select: none;
     }
@@ -3193,8 +3414,8 @@
       justify-content: center;
       gap: 12px;
       box-sizing: border-box;
-      width: 220px;
-      height: 132px;
+      width: 260px;
+      height: 148px;
       background: none;
       border: 2px dashed #444;
       border-radius: 12px;
@@ -3218,6 +3439,15 @@
       font-size: 16px;
       line-height: 1;
       white-space: nowrap;
+    }
+    /* ドロップでも読み込めることの補足 */
+    .videoPlaceholderBtn .videoPlaceholderHint {
+      margin-top: -4px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: #aaa;
+      white-space: normal;
+      text-align: center;
     }
     .videoPlaceholderBtn:hover {
       border-color: #888;

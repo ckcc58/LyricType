@@ -13,9 +13,13 @@ export type FontOption = {
 
 const JP = '"Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif';
 
-export const DEFAULT_FONT_ID = 'M PLUS 1';
+export const DEFAULT_FONT_ID = 'browser';
 
 export const FONT_OPTIONS: FontOption[] = [
+  // ブラウザ側の「標準フォント」設定をそのまま使う (web フォントを当てない)。
+  // sans-serif はブラウザ設定の総称ファミリに解決されるため、
+  // ユーザーが OS/ブラウザで選んだ日本語フォントが適用される。
+  { id: 'browser', label: 'ブラウザ既定', stack: 'sans-serif' },
   { id: 'M PLUS 1', label: 'M PLUS 1', stack: `"M PLUS 1", ${JP}` },
   { id: 'Noto Sans JP', label: 'Noto Sans JP', stack: `"Noto Sans JP", ${JP}` },
 ];

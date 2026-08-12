@@ -4,6 +4,10 @@ class ChartState {
   // LRC
   lrcContent = $state("");
   lrcYtId = $state(""); // 既存LRCから読み取った@ytid
+  // 本体 (タグ範囲) の前後のメタ情報 (@Ruby / [ti:] / クレジット行等) を
+  // 無解釈のまま保持し、ファイル保存時に復元する
+  lrcHeader = $state("");
+  lrcFooter = $state("");
 
   // LRC 検索・置換 (リテラル検索 + 一部エスケープ \s \d \n \t をサポート)
   lrcFindText = $state("");

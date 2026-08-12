@@ -137,11 +137,71 @@ export async function copyYtypingJson(cb: TtRegenCallbacks): Promise<void> {
   await navigator.clipboard.writeText(json);
 }
 
-/** lrc + repl.txt を譜面フォルダ単位で一括保存 */
-export async function saveChartFolder(cb: TtRegenCallbacks): Promise<void> {
+/** フォルダへの書き込み権限を確保する。許可済みならプロンプトは出ない。
+ *  requestPermission はユーザー操作直後 (クリックハンドラ内) でのみ通る点に注意。 */
+async function ensureWritePermission(
+  handle: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  const h = handle as unknown as {
+    queryPermission?: (o: { mode: string }) => Promise<PermissionState>;
+    requestPermission?: (o: { mode: string }) => Promise<PermissionState>;
+  };
+  // 権限 API 非対応なら、実際の書き込みで失敗するかどうかに任せる
+  if (!h.queryPermission || !h.requestPermission) return true;
+  if ((await h.queryPermission({ mode: "readwrite" })) === "granted")
+    return true;
+  return (await h.requestPermission({ mode: "readwrite" })) === "granted";
+}
+
+/** dirHandle 直下へ .lrc / .repl.txt を書き出す。
+ *  ニコ生タイピングの譜面フォルダは「フォルダ名.lrc」「フォルダ名.repl.txt」の
+ *  構成が前提なので、ファイル名はフォルダ名から作る。 */
+async function writeChartFolder(
+  dirHandle: FileSystemDirectoryHandle,
+  fallbackName: string,
+): Promise<void> {
+  const baseName = sanitizeFilename(dirHandle.name) || fallbackName;
+
+  if (tt.lrcText.trim()) {
+    const lrcHandle = await dirHandle.getFileHandle(`${baseName}.lrc`, {
+      create: true,
+    });
+    const lrcWritable = await lrcHandle.createWritable();
+    await lrcWritable.write(new TextEncoder().encode(getLrcForSave()));
+    await lrcWritable.close();
+  }
+
+  if (chart.chartReplContent.trim()) {
+    const replHandle = await dirHandle.getFileHandle(`${baseName}.repl.txt`, {
+      create: true,
+    });
+    const replWritable = await replHandle.createWritable();
+    await replWritable.write(await encodeToSjis(chart.chartReplContent));
+    await replWritable.close();
+  }
+}
+
+/** lrc + repl.txt を譜面フォルダ単位で一括保存
+ *  @param chooseFolder true なら読み込み元があっても必ずピッカーを出す */
+export async function saveChartFolder(
+  cb: TtRegenCallbacks,
+  chooseFolder = false,
+): Promise<void> {
   cb.syncLrcToTimeTagLines();
   cb.generateTtLrc();
   const safeName = sanitizeFilename(submit.loadedTitle || "chart");
+
+  // 読み込んだ譜面フォルダのハンドルがあれば、ピッカーを出さずそこへ上書きする
+  if (!chooseFolder && ui.lastFolderHandle) {
+    try {
+      if (await ensureWritePermission(ui.lastFolderHandle)) {
+        await writeChartFolder(ui.lastFolderHandle, safeName);
+        return;
+      }
+    } catch {
+      // 権限拒否・フォルダ移動/削除など → 下のピッカーへフォールバック
+    }
+  }
 
   if (window.showDirectoryPicker) {
     try {
@@ -150,26 +210,9 @@ export async function saveChartFolder(cb: TtRegenCallbacks): Promise<void> {
           mode: "readwrite",
           ...(ui.lastFolderHandle ? { startIn: ui.lastFolderHandle } : {}),
         });
+      // 選んだフォルダを以降の保存先にする
       ui.lastFolderHandle = dirHandle;
-
-      if (tt.lrcText.trim()) {
-        const lrcHandle = await dirHandle.getFileHandle(`${safeName}.lrc`, {
-          create: true,
-        });
-        const lrcWritable = await lrcHandle.createWritable();
-        await lrcWritable.write(new TextEncoder().encode(getLrcForSave()));
-        await lrcWritable.close();
-      }
-
-      if (chart.chartReplContent.trim()) {
-        const replHandle = await dirHandle.getFileHandle(
-          `${safeName}.repl.txt`,
-          { create: true },
-        );
-        const replWritable = await replHandle.createWritable();
-        await replWritable.write(await encodeToSjis(chart.chartReplContent));
-        await replWritable.close();
-      }
+      await writeChartFolder(dirHandle, safeName);
       return;
     } catch (e: unknown) {
       if (e instanceof Error && e.name === "AbortError") return;

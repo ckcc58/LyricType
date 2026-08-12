@@ -1,8 +1,85 @@
 <script lang="ts">
-  import { createInfiniteQuery } from "@tanstack/svelte-query";
+  import {
+    createInfiniteQuery,
+    useQueryClient,
+    type InfiniteData,
+  } from "@tanstack/svelte-query";
   import { chartThumbnailUrl, chartGradient } from "$lib/chart-thumbnail";
+  import { createPreviewState } from "$lib/chart-preview.svelte";
+  import ChartPreviewDock from "$lib/components/ChartPreviewDock.svelte";
+  import { getDroppedFolder } from "$lib/folder-drop";
+  import { pendingChartFolder } from "../store";
+  import { goto } from "$app/navigation";
 
   let { data } = $props();
+
+  // --- 譜面フォルダをドロップ → エディタ / ローカルプレイ を選択 ---
+  let isDragOver = $state(false);
+  let dropped = $state<{ name: string; files: File[] } | null>(null);
+  let choiceIdx = $state(0);
+  const CHOICES = [
+    { label: "ローカルプレイ", desc: "この譜面をすぐ遊ぶ", href: "/chart/local" },
+    { label: "エディタで開く", desc: "タイムタグを編集する", href: "/edit" },
+  ];
+
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault();
+    isDragOver = true;
+  }
+  function handleDragLeave(e: DragEvent) {
+    if (
+      e.currentTarget === e.target ||
+      !(e.currentTarget as Element)?.contains(e.relatedTarget as Node)
+    ) {
+      isDragOver = false;
+    }
+  }
+  async function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    isDragOver = false;
+    const folder = await getDroppedFolder(e);
+    if (!folder) {
+      alert("譜面フォルダをドロップしてください");
+      return;
+    }
+    dropped = folder;
+    choiceIdx = 0;
+  }
+
+  /** 選択した遷移先へフォルダを渡して移動する */
+  function goWithFolder(idx: number) {
+    const target = CHOICES[idx];
+    if (!target || !dropped) return;
+    pendingChartFolder.set(dropped);
+    dropped = null;
+    goto(target.href);
+  }
+
+  function handleChoiceKeydown(e: KeyboardEvent) {
+    switch (e.code) {
+      case "ArrowDown":
+      case "KeyK":
+      case "ArrowUp":
+      case "KeyI":
+        e.preventDefault();
+        choiceIdx = (choiceIdx + 1) % CHOICES.length;
+        return;
+      case "Enter":
+      case "Space":
+        e.preventDefault();
+        goWithFolder(choiceIdx);
+        return;
+      case "Digit1":
+      case "Digit2":
+        e.preventDefault();
+        goWithFolder(Number(e.code.slice(5)) - 1);
+        return;
+      case "Escape":
+        e.preventDefault();
+        dropped = null;
+        return;
+    }
+  }
 
   type CharTypes = {
     kanji: number;
@@ -32,6 +109,7 @@
     play_count: number;
     score_count: number;
     duration_seconds: number | null;
+    preview_time: number | null;
     created_at: string;
     uploader_id: number;
     users: { name: string } | { name: string }[] | null;
@@ -62,6 +140,30 @@
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
     return `${m}:${s.toString().padStart(2, "0")}`;
+  }
+
+  // --- サムネイルからのプレビュー再生 (ロジックは $lib/chart-preview で共有) ---
+  const preview = createPreviewState();
+
+  /** フォルダドロップの選択中はそちらの Esc を優先し、それ以外は プレビュー停止 */
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    if (dropped) {
+      handleChoiceKeydown(e);
+      return;
+    }
+    preview.handleEscape(e);
+  }
+
+  /** 英語譜面の度合い。英字 9 割以上 = "full"、5 割以上 = "half"、それ未満 = null */
+  function englishLevel(types: CharTypes | null): "full" | "half" | null {
+    if (!types) return null;
+    const total =
+      types.kanji + types.hiragana + types.katakana + types.english + types.digit;
+    if (total === 0) return null;
+    const ratio = types.english / total;
+    if (ratio >= 0.9) return "full";
+    if (ratio >= 0.5) return "half";
+    return null;
   }
 
   function charTypePct(
@@ -107,6 +209,24 @@
     },
   }));
 
+  const queryClient = useQueryClient();
+
+  // SPA 遷移のたびに server load が取り直す最新の先頭20件をクエリキャッシュへ反映する。
+  // initialData はキャッシュが空の初回しか使われないため、再訪時にこれをやらないと
+  // 古いカードが表示され続ける (エディタで譜面更新 → サイドメニューからトップへ、のケース)。
+  // 2ページ目以降 (無限スクロール分) は維持する。
+  $effect(() => {
+    const page0: PageResult = {
+      charts: data.charts as unknown as Chart[],
+      nextPage: data.charts.length === 20 ? 1 : null,
+    };
+    queryClient.setQueryData<InfiniteData<PageResult>>(["charts"], (old) =>
+      old
+        ? { ...old, pages: [page0, ...old.pages.slice(1)] }
+        : { pages: [page0], pageParams: [0] },
+    );
+  });
+
   let sentinel: HTMLDivElement | undefined = $state();
 
   $effect(() => {
@@ -131,27 +251,93 @@
     (query.data?.pages ?? []).flatMap((p) => p.charts),
   );
 
+  /** 再生中の譜面。読み込み済みの全ページから引く */
+  let previewChart = $derived(
+    preview.id === null
+      ? null
+      : (allCharts.find((c) => c.id === preview.id) ?? null),
+  );
+
 </script>
 
-<div class="home">
+<svelte:window onkeydown={handleGlobalKeydown} />
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="home"
+  class:dragOver={isDragOver}
+  ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
+  ondrop={handleDrop}
+>
+  {#if dropped}
+    <div class="drop-choice-overlay" role="dialog">
+      <div class="drop-choice">
+        <div class="drop-choice-title">{dropped.name}</div>
+        {#each CHOICES as c, i}
+          <button
+            class="drop-choice-btn"
+            class:focused={i === choiceIdx}
+            onclick={() => goWithFolder(i)}
+            onmouseenter={() => (choiceIdx = i)}
+          >
+            <span class="drop-choice-num">{i + 1}</span>
+            <span class="drop-choice-label">{c.label}</span>
+            <span class="drop-choice-desc">{c.desc}</span>
+          </button>
+        {/each}
+        <div class="drop-choice-hint">↑↓ で選択 / Enter で決定 / Esc で取消</div>
+      </div>
+    </div>
+  {/if}
+
   <div class="header">
     <h1>譜面一覧</h1>
   </div>
 
   <div class="chart-list">
     {#each allCharts as chart (chart.id)}
-      <a href="/chart/{chart.id}" class="chart-row">
+      {@const enLevel = englishLevel(chart.char_types)}
+      <a
+        href="/chart/{chart.id}"
+        class="chart-row"
+        class:english-full={enLevel === "full"}
+        class:english-half={enLevel === "half"}
+        title={enLevel === "full"
+          ? "英字が9割以上の譜面"
+          : enLevel === "half"
+            ? "英字が5割以上の譜面"
+            : undefined}
+      >
         <div class="chart-thumb-wrap">
           {#if chart.youtube_video_id}
-            <img
-              class="chart-thumb"
-              src={chartThumbnailUrl(chart.youtube_video_id)}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              width="320"
-              height="180"
-            />
+            <!-- サムネ全体がプレビュー開始のボタン。再生自体は右下のプレイヤーで行う。
+                 譜面ページへの遷移は togglePreview 内の preventDefault で抑止する -->
+            <button
+              type="button"
+              class="preview-trigger"
+              class:playing={preview.isPlaying(chart.id)}
+              onclick={(e) => preview.toggle(e, chart)}
+              aria-label="{chart.title} のプレビューを{preview.isPlaying(chart.id)
+                ? '止める'
+                : '再生'}"
+              title={preview.isPlaying(chart.id)
+                ? "プレビューを止める (Esc)"
+                : "プレビューを再生"}
+            >
+              <img
+                class="chart-thumb"
+                src={chartThumbnailUrl(chart.youtube_video_id)}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                width="320"
+                height="180"
+              />
+              <span class="preview-btn" aria-hidden="true"
+                >{preview.isPlaying(chart.id) ? "■" : "▶"}</span
+              >
+            </button>
           {:else}
             <div
               class="chart-thumb chart-thumb-fallback"
@@ -245,7 +431,88 @@
   {/if}
 </div>
 
+<ChartPreviewDock chart={previewChart} onclose={() => preview.stop()} />
+
 <style>
+  /* --- 譜面フォルダのドロップ --- */
+  .home.dragOver::after {
+    content: "譜面フォルダをドロップ";
+    position: fixed;
+    inset: 0;
+    z-index: 900;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+    border: 3px dashed var(--accent);
+    color: var(--text-primary);
+    font-size: 1.2rem;
+    pointer-events: none;
+  }
+  .drop-choice-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+  }
+  .drop-choice {
+    background: var(--bg-card);
+    border-radius: 12px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 320px;
+  }
+  .drop-choice-title {
+    color: var(--text-primary);
+    font-size: 1rem;
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .drop-choice-btn {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 0.95rem;
+    font-family: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .drop-choice-btn.focused {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--bg-input), white 6%);
+  }
+  .drop-choice-num {
+    min-width: 14px;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+  }
+  .drop-choice-label {
+    font-weight: 600;
+  }
+  .drop-choice-desc {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+  }
+  .drop-choice-hint {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    text-align: center;
+  }
+
   .home {
     /* 背景は全幅に敷き、中身だけ padding で 1080px 相当に中央寄せする
        (max-width だと広い画面で左右に body の地色が露出する) */
@@ -297,14 +564,96 @@
     border-color: #3a3c43;
   }
 
+  /* 英語譜面: --accent-english を背景に混ぜて識別する。
+     文字のコントラストを保つため、地色に対して薄く乗せるだけにする。
+     英字5割以上 = 枠線のみ / 9割以上 = 背景ごと色付け、の2段階 */
+  .chart-row.english-half {
+    /* 下半分にだけ色が滲むグラデーション (上端は地色のまま) */
+    background: linear-gradient(
+      to right,
+      #24262b 25%,
+      color-mix(in srgb, var(--accent-english) 20%, #24262b) 100%
+    );
+    border-color: color-mix(in srgb, var(--accent-english) 30%, #2f3137);
+  }
+  .chart-row.english-half:hover {
+    background: linear-gradient(
+      to right,
+      #2b2d33 25%,
+      color-mix(in srgb, var(--accent-english) 40%, #2b2d33) 100%
+    );
+    border-color: color-mix(in srgb, var(--accent-english) 40%, #3a3c43);
+  }
+  .chart-row.english-full {
+    background: color-mix(in srgb, var(--accent-english) 30%, #24262b);
+    border-color: color-mix(in srgb, var(--accent-english) 30%, #2f3137);
+  }
+  .chart-row.english-full:hover {
+    background: color-mix(in srgb, var(--accent-english) 40%, #2b2d33);
+    border-color: color-mix(in srgb, var(--accent-english) 40%, #3a3c43);
+  }
+
+  /* サムネのプレビュー再生 */
+  /* サムネ全体を覆うプレビュー起動ボタン */
+  .preview-trigger {
+    display: block;
+    position: absolute;
+    inset: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+  }
+
+  .preview-btn {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease, background 0.15s ease;
+  }
+
+  /* ▶ はサムネにポインタ/フォーカスがあるときだけ出す
+     (カード全体の hover で出すと、譜面ページを開くつもりの時に紛らわしい)。
+     再生中の譜面は「今どれが鳴っているか」が分かるよう常時 ■ を出す */
+  .preview-trigger:hover .preview-btn,
+  .preview-trigger:focus-visible .preview-btn,
+  .preview-trigger.playing .preview-btn {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.75);
+  }
+  .preview-trigger.playing .chart-thumb {
+    filter: brightness(0.6);
+  }
+
   .chart-thumb-wrap {
+    position: relative;
     flex: 0 0 auto;
-    width: 130px;
+    /* 親 .chart-row は align-items 未指定 = stretch。
+       stretch は height:auto の要素に効くため、aspect-ratio があっても
+       カード高さまで縦に伸ばされて 16:9 が崩れ、サムネの左右が切れる。 */
+    align-self: flex-start;
+    width: 170px;
     aspect-ratio: 16 / 9;
     border-radius: 6px;
     overflow: hidden;
     background: #0e0f12;
-    box-shadow: 5px 5px 10px rgba(0, 0, 0, 0.5);
+    box-shadow: 5px 5px 20px rgba(0, 0, 0, 0.5);
   }
 
   .chart-thumb {
@@ -324,6 +673,10 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
+    /* サムネ (16:9) の高さに揃え、タイトル群と数値行を上下に振り分ける。
+       余った縦方向をここで吸収するのでサムネ下に隙間が残らない */
+    min-height: calc(170px * 9 / 16);
+    justify-content: space-between;
     gap: 4px;
   }
 
@@ -359,7 +712,7 @@
     display: inline-flex;
     align-items: baseline;
     gap: 4px;
-    color: #ccc;
+    color: #fff;
     white-space: nowrap;
     min-width: 0;
   }
@@ -371,7 +724,7 @@
     align-self: center;
   }
   .chart-stat-label {
-    color: #888888;
+    color: #dcd6d6;
     font-size: 0.72rem;
   }
   .chart-stat-value {
@@ -379,7 +732,7 @@
     font-variant-numeric: tabular-nums;
   }
   .chart-stat-unit {
-    color: #888888;
+    color: #dcd6d6;
     font-size: 0.72rem;
     margin-left: -1px;
   }
@@ -531,7 +884,11 @@
     }
 
     .chart-thumb-wrap {
-      width: 104px;
+      width: 134px;
+    }
+
+    .chart-body {
+      min-height: calc(134px * 9 / 16);
     }
 
     .chart-bottom-row {

@@ -55,8 +55,20 @@ export const PUT: RequestHandler = async ({ params, request, locals }) => {
 
 	const chartData = serializeChart(lyric);
 	const phraseCount = lyric.length;
-	const durationSeconds =
-		lyric.length > 0 ? Math.ceil(lyric[lyric.length - 1].endTime - lyric[0].time) : 0;
+	// プレビュー開始位置: 明示指定が無ければ歌詞の最初のタイムタグ時刻
+	const previewTime =
+		data.preview_time !== undefined
+			? data.preview_time
+			: lyric.length > 0
+				? lyric[0].time
+				: null;
+
+	// 実曲長 (クライアントのプレイヤー由来) を優先。無ければ歌詞末尾から近似
+	const durationSeconds = data.duration_seconds
+		? Math.ceil(data.duration_seconds)
+		: lyric.length > 0
+			? Math.ceil(lyric[lyric.length - 1].endTime - lyric[0].time)
+			: 0;
 	const {
 		avgCpm,
 		medianCpm,
@@ -66,7 +78,7 @@ export const PUT: RequestHandler = async ({ params, request, locals }) => {
 		peakEndLineNo,
 		peakEndLineText,
 		charTypes
-	} = calcDifficulty(chartData.lyric);
+	} = calcDifficulty(chartData.lyric, data.duration_seconds);
 
 	let query = locals.supabase
 		.from('charts')
@@ -82,6 +94,7 @@ export const PUT: RequestHandler = async ({ params, request, locals }) => {
 			note_count: noteCount,
 			phrase_count: phraseCount,
 			duration_seconds: durationSeconds,
+			preview_time: previewTime,
 			source: data.source || '',
 			tags: data.tags ?? [],
 			avg_cpm: avgCpm,

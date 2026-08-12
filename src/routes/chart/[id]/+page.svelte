@@ -7,6 +7,9 @@
     import { volume, imageURL, media } from "../../../store.ts";
     import { updateSetting } from "$lib/settings";
     import { chartFromJSON, type ChartDataJSON } from "$lib/chart-serialization";
+    import { createPreviewState } from "$lib/chart-preview.svelte";
+    import { ensureYouTubeIframeApi } from "$lib/youtube-iframe-api";
+    import ChartPreviewDock from "$lib/components/ChartPreviewDock.svelte";
     import { get } from "svelte/store";
     import { page } from "$app/stores";
     import { invalidateAll } from "$app/navigation";
@@ -51,7 +54,7 @@
             if (!res.ok) throw new Error('failed to load rankings');
             return res.json();
         },
-        staleTime: 60_000, // 1分間は再fetchしない
+        staleTime: 0, // ページに来るたびに再取得して常に最新を表示
     }));
 
     // その他の譜面（最新の譜面一覧から、現在の譜面を除く）
@@ -63,6 +66,7 @@
         median_cpm: number | null;
         peak_cpm: number | null;
         youtube_video_id: string | null;
+        preview_time: number | null;
     };
     const otherChartsQuery = createQuery<{ charts: OtherChart[] }>(() => ({
         queryKey: ['other-charts'],
@@ -71,8 +75,18 @@
             if (!res.ok) throw new Error('failed to load other charts');
             return res.json();
         },
-        staleTime: 5 * 60_000, // 5分キャッシュ
+        // ページに来るたびに再検証する。サーバ側が ETag を返すので
+        // 内容が変わっていなければ 304 (本文なし) で実質タダ
+        staleTime: 0,
     }));
+
+    // --- その他の譜面のプレビュー再生 (ロジックは $lib/chart-preview で共有) ---
+    const preview = createPreviewState();
+    let previewChart = $derived(
+        preview.id === null
+            ? null
+            : (otherChartsQuery.data?.charts.find((c) => c.id === preview.id) ?? null),
+    );
 
     // スコア送信状態
     let scoreSubmitStatus: 'idle' | 'sending' | 'sent' | 'error' = $state('idle');
@@ -195,34 +209,7 @@
     // ロード済みセッションキー（chart_id + replay_id の組み合わせ）。
     // currentReplay が変わったら再初期化したいので id 単位で判定する。
     let lastInitKey: string | null = null;
-    let youtubeApiPromise: Promise<void> | null = null;
 
-    function ensureYouTubeIframeApi(): Promise<void> {
-        if ((window as any).YT?.Player) return Promise.resolve();
-        if (youtubeApiPromise) return youtubeApiPromise;
-
-        youtubeApiPromise = new Promise((resolve, reject) => {
-            const existing = document.getElementById("yt-api-script") as HTMLScriptElement | null;
-            const previousReady = (window as any).onYouTubeIframeAPIReady;
-            (window as any).onYouTubeIframeAPIReady = () => {
-                previousReady?.();
-                resolve();
-            };
-
-            if (existing) {
-                existing.addEventListener("error", () => reject(new Error("failed to load YouTube iframe API")), { once: true });
-                return;
-            }
-
-            const script = document.createElement("script");
-            script.id = "yt-api-script";
-            script.src = "https://www.youtube.com/iframe_api";
-            script.onerror = () => reject(new Error("failed to load YouTube iframe API"));
-            document.head.appendChild(script);
-        });
-
-        return youtubeApiPromise;
-    }
 
     // 譜面切替(同一ルート遷移)時に前の譜面の残留状態をリセットする。
     // コンポーネントが再利用され onMount が再実行されないため、明示的にクリアが必要。
@@ -234,6 +221,9 @@
         currentReplay = null;
         scoreSubmitStatus = 'idle';
         scoreSubmitError = '';
+        // 譜面→譜面の同一ルート遷移ではコンポーネントが再マウントされないため、
+        // グローバルキーの「その他の譜面」を明示的に再検証する (ETag で 304 なら実質タダ)
+        queryClient.invalidateQueries({ queryKey: ['other-charts'] });
     });
 
     // chart_data が届いた時 + リプレイ切替時に ChartGame を初期化/再初期化
@@ -263,6 +253,7 @@
         const unsub = gamePhase.subscribe((phase) => {
             if (phase === 'waiting' && startedKey === lastInitKey) {
                 unsub();
+                preview.stop(); // ゲーム音とプレビューが二重に鳴らないよう止める
                 ChartGame.start();
             }
         });
@@ -343,6 +334,17 @@
                     playerVars: { rel: 0, modestbranding: 1, controls: 0, cc_load_policy: 0, iv_load_policy: 3 },
                     events: {
                         onReady: () => resolve(),
+                        // 字幕の強制オフ。cc_load_policy:0 は「視聴者のYouTube設定に従う」なので、
+                        // 字幕モジュールがロードされた通知 (onApiChange) の時点で表示トラックを
+                        // 空にする。unloadModule は現行プレイヤーでは無効化されており使えない。
+                        onApiChange: (e: { target: YT.Player }) => {
+                            try {
+                                const p = e.target as any;
+                                if (p.getOptions?.()?.includes?.('captions')) {
+                                    p.setOption('captions', 'track', {});
+                                }
+                            } catch { /* API 変更時も字幕が出るだけに留める */ }
+                        },
                     },
                 });
             });
@@ -354,13 +356,20 @@
     async function handleStartKey(e: KeyboardEvent) {
         const phase = get(gamePhase);
 
+        // プレビュー再生中の Esc はプレビュー停止を優先する
+        // (ゲーム中の一時停止より、今出ているプレイヤーを閉じる方が自然)
+        if (preview.handleEscape(e)) return;
+
         // リプレイ中: 左右矢印で 5 秒シーク
         if (e.key === 'Enter' && phase === 'waiting') {
             e.preventDefault();
+            preview.stop(); // ゲーム音とプレビューが二重に鳴らないよう止める
             ChartGame.start();
             await tick();
             document.getElementById('text-input')?.focus();
-        } else if (e.key === 'Escape' && (phase === 'playing' || phase === 'grace')) {
+        } else if (e.key === 'Escape' && phase === 'playing') {
+            // grace 中は対象外: grace は performance.now() ベースで一時停止不能なうえ、
+            // 終了扱いの media に play() すると途中再開/先頭再生の不具合を誘発する
             e.preventDefault();
             const audio = ChartGame.audio;
             if (!audio) return;
@@ -378,6 +387,7 @@
             await retryGame();
             // リプレイからの F4 は restartReplay 済みなので通常プレイ用の start() は呼ばない
             if (wasReplay) return;
+            preview.stop(); // ゲーム音とプレビューが二重に鳴らないよう止める
             ChartGame.start();
             await tick();
             document.getElementById('text-input')?.focus();
@@ -393,23 +403,28 @@
         addKeyHandler();
         document.addEventListener('keydown', handleStartKey);
 
-        // inputフォーカス検知
+        // 全画面表示 (inputFocused) の切り替え。
+        //   ON : 入力欄にフォーカスが入ったとき
+        //   OFF: play-box の外をクリック / play-box 外の要素にフォーカスが入ったとき
+        // focusout は使わない (移動先が確定せず、play-box 内のボタンを押しただけで
+        // 解除されてしまうため)。
         const onFocusIn = (e: FocusEvent) => {
-            if ((e.target as HTMLElement)?.id === 'text-input') {
-                queueMicrotask(() => {
-                    inputFocused = true;
-                });
+            const target = e.target as HTMLElement | null;
+            if (target?.id === 'text-input') {
+                inputFocused = true;
+            } else if (target && !target.closest('#play-box')) {
+                // サイドメニュー等、play-box の外へフォーカスが移ったら解除
+                inputFocused = false;
             }
         };
-        const onFocusOut = (e: FocusEvent) => {
-            if ((e.target as HTMLElement)?.id === 'text-input') {
-                queueMicrotask(() => {
-                    inputFocused = false;
-                });
+        const onPointerDown = (e: PointerEvent) => {
+            const target = e.target as HTMLElement | null;
+            if (!target || !target.closest('#play-box')) {
+                inputFocused = false;
             }
         };
         document.addEventListener('focusin', onFocusIn);
-        document.addEventListener('focusout', onFocusOut);
+        document.addEventListener('pointerdown', onPointerDown);
 
         // マウスホバーでUI表示
         const HOVER_TOP_THRESHOLD = 60;
@@ -441,7 +456,7 @@
             ChartGame.init();
             document.removeEventListener('keydown', handleStartKey);
             document.removeEventListener('focusin', onFocusIn);
-            document.removeEventListener('focusout', onFocusOut);
+            document.removeEventListener('pointerdown', onPointerDown);
             document.removeEventListener('mousemove', onMouseMove);
             document.removeEventListener('mouseleave', onMouseLeave);
         };
@@ -483,6 +498,12 @@
                             {#if data.chart.youtube_video_id}
                                 <button type="button" class="chart-action-btn" onclick={openYouTube}>YouTube</button>
                             {/if}
+                            <button
+                                type="button"
+                                class="chart-action-btn shortcut-help-btn"
+                                onclick={() => overlayRef?.toggleShortcuts()}
+                                title="ショートカット一覧">?</button
+                            >
                             {#if $gamePhase !== 'waiting'}
                                 <div id="volume-controler">
                                     <input
@@ -515,7 +536,7 @@
                                 <button class="result-btn ranking-btn error" onclick={() => { scoreSubmitStatus = 'idle'; }}>{scoreSubmitError} (再試行)</button>
                             {/if}
                         {/if}
-                        <button class="result-btn retry-btn" onclick={() => retryGame()}>Retry</button>
+                        <button class="result-btn retry-btn" onclick={() => retryGame()}>リトライ</button>
                         <a href="/" class="result-btn select-btn">譜面一覧へ</a>
                     {/snippet}
                 </GameOverlay>
@@ -587,6 +608,11 @@
 
     <aside class="other-charts-section">
         <h3 class="ranking-title">その他の譜面</h3>
+        <ChartPreviewDock
+            chart={previewChart}
+            position="top"
+            onclose={() => preview.stop()}
+        />
         <div class="other-charts-scroll">
         {#if otherChartsQuery.isPending}
             <p class="ranking-empty">読み込み中...</p>
@@ -616,6 +642,21 @@
                                 <div class="other-chart-line">中央値 {c.median_cpm ?? '--'} CPM</div>
                                 <div class="other-chart-line">最高 {c.peak_cpm ?? '--'} CPM</div>
                             </div>
+                            {#if c.youtube_video_id}
+                                <button
+                                    type="button"
+                                    class="other-preview-btn"
+                                    class:playing={preview.isPlaying(c.id)}
+                                    onclick={(e) => preview.toggle(e, c)}
+                                    aria-label="{c.title} のプレビューを{preview.isPlaying(c.id)
+                                        ? '止める'
+                                        : '再生'}"
+                                    title={preview.isPlaying(c.id)
+                                        ? 'プレビューを止める (Esc)'
+                                        : 'プレビューを再生'}
+                                    >{preview.isPlaying(c.id) ? '■' : '▶'}</button
+                                >
+                            {/if}
                         </a>
                     </li>
                 {/each}
@@ -625,6 +666,7 @@
     </aside>
     </div>
 </div>
+
 
 <style>
     #game {
@@ -645,37 +687,39 @@
         padding: 0 12px;
         box-sizing: border-box;
     }
+    /* ローカル譜面 chart/local の #load-chart-btn と同一の宣言に揃えること */
     .chart-action-btn {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 58px;
-        height: 22px;
+        gap: 4px;
+        width: fit-content;
         box-sizing: border-box;
-        color: #aaa;
-        font-family: inherit;
-        font-size: 0.65rem;
-        font-weight: 400;
-        line-height: 1;
-        text-decoration: none;
-        padding: 0;
-        border: 1px solid #444;
-        border-radius: 4px;
-        white-space: nowrap;
-        background: #151515;
+        padding: 2px 10px;
+        color: #ccc;
+        background-color: rgba(255, 255, 255, 0.1);
+        border: 1px solid #666;
+        border-radius: 5px;
         cursor: pointer;
+        font-family: inherit;
+        font-size: 0.75rem;
+        font-weight: 400;
+        line-height: normal;
+        text-decoration: none;
+        white-space: nowrap;
     }
     .chart-action-btn:hover {
-        color: #ddd;
-        border-color: #888;
-        background: #202020;
+        background-color: rgba(255, 255, 255, 0.2);
+        color: white;
     }
 
+    /* リプレイ中の表示: 彩度を持たせず、他のコントロールと同じ無彩色で揃える */
     .replay-indicator {
-        color: #4dd0e1;
+        color: #ddd;
         font-size: 0.65rem;
         padding: 1px 6px;
-        border: 1px solid #4dd0e1;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid #555;
         border-radius: 3px;
         white-space: nowrap;
     }
@@ -703,23 +747,27 @@
     #volume-controler {
         display: flex;
         align-items: center;
-        gap: 8px;
         width: 150px;
         margin-left: auto;
     }
     #volume-controler input[type="range"] {
         height: 4px;
+        min-width: 0; /* range の固有幅で #volume を押し出さないようにする */
         accent-color: #777;
         cursor: pointer;
     }
 
+    /* 3 桁 (100) でも縮まないよう flex-shrink: 0。
+       tabular-nums で桁数が変わっても右端がぶれないようにする */
     #volume {
-        width: 24px;
+        flex-shrink: 0;
+        width: 22px;
         color: #aaa;
         text-align: right;
         background: transparent;
         border: none;
         font-size: 11px;
+        font-variant-numeric: tabular-nums;
     }
 
     #content {
@@ -905,9 +953,13 @@
         background-color: #111;
     }
 
+    /* 自分の行: 色ではなく「わずかな背景 + 左の罫線」で示す */
     .ranking-table tr.my-score td {
-        background-color: inherit;
+        background-color: rgba(255, 255, 255, 0.06);
         color: inherit;
+    }
+    .ranking-table tr.my-score td:first-child {
+        box-shadow: inset 2px 0 0 rgba(255, 255, 255, 0.5);
     }
 
     .rank-col {
@@ -930,7 +982,10 @@
         display: inline-block;
         max-width: 100%;
     }
-    .my-score .user-name { color: #47d7e8; }
+    .my-score .user-name {
+        color: #fff;
+        font-weight: 600;
+    }
 
     .score-col {
         width: 76px;
@@ -1023,6 +1078,40 @@
         border-color: rgba(255, 255, 255, 0.14);
     }
     /* サムネ: テキストの背後に 16:9 で透過表示。右端から左へフェードさせて文字を読みやすく保つ */
+    /* 行の右下に置くプレビュー再生ボタン。
+       行にポインタ/フォーカスがあるときだけ出し、再生中は常時表示する */
+    .other-preview-btn {
+        position: absolute;
+        right: 8px;
+        bottom: 8px;
+        z-index: 2;
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        padding: 0;
+        border: 1px solid rgba(255, 255, 255, 0.5);
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.6);
+        color: var(--text-primary);
+        font-size: 0.62rem;
+        line-height: 1;
+        cursor: pointer;
+        opacity: 0;
+        transition: opacity 0.15s ease, background 0.15s ease;
+    }
+    .other-chart-row:hover .other-preview-btn,
+    .other-preview-btn:focus-visible,
+    .other-preview-btn.playing {
+        opacity: 1;
+    }
+    .other-preview-btn:hover {
+        background: rgba(0, 0, 0, 0.85);
+    }
+
+
     .other-chart-thumb {
         position: absolute;
         top: 0;

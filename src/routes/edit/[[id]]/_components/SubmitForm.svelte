@@ -2,7 +2,7 @@
   Settings panel の「情報&投稿」タブ
   - フォルダオープンボタン (隠し input fallback 含む)
   - YouTube Video ID 入力 + 自動入力ボタン
-  - 曲名 / アーティスト / ソース / コメント
+  - 曲名 / アーティスト / ソース / コメント / プレビュー開始位置
   - タグ入力 (presets + AI suggest)
   - 投稿ボタン + チェックボタン + 譜面ページへのリンク
 -->
@@ -27,11 +27,44 @@
     loadYouTubeFromSubmitId: () => void;
     /** TT 再生成コールバック (submitChart に渡す) */
     ttRegenCb: TtRegenCallbacks;
+    /** プレイヤーの現在再生位置 (秒) */
+    getPlayerTime: () => number;
+    /** 指定位置へシークして再生する (プレビュー位置の確認用) */
+    seekAndPlay: (sec: number) => void;
   };
   let {
     loadYouTubeFromSubmitId,
     ttRegenCb,
+    getPlayerTime,
+    seekAndPlay,
   }: Props = $props();
+
+  /** プレビュー開始位置を delta 秒ずらす (未入力なら最初のタイムタグ基準) */
+  function stepPreview(delta: number): void {
+    const base = submit.previewTime.trim()
+      ? Number(submit.previewTime)
+      : (firstTagSec ?? 0);
+    const v = Number.isFinite(base) ? base : 0;
+    submit.previewTime = Math.max(0, Math.round((v + delta) * 100) / 100).toFixed(2);
+  }
+
+  /** 歌詞の最初のタイムタグ時刻 (秒)。未入力時の既定値の案内に使う */
+  let firstTagSec = $derived.by(() => {
+    const m = chart.lrcContent.match(/\[(\d\d):(\d\d):(\d\d)\]/);
+    if (!m) return null;
+    return +m[1] * 60 + +m[2] + +m[3] / 100;
+  });
+
+  /**
+   * プレビュー開始位置から再生して聞き比べる。
+   * 未入力なら投稿時に採用される値 (最初のタイムタグ) で鳴らす。
+   */
+  function playFromPreviewTime(): void {
+    const raw = submit.previewTime.trim();
+    const sec = raw === "" ? firstTagSec : Number(raw);
+    if (sec === null || !Number.isFinite(sec) || sec < 0) return;
+    seekAndPlay(sec);
+  }
 
   let isOwner = $derived(
     submit.editingChartId !== null &&
@@ -146,6 +179,53 @@
   </label>
 </div>
 
+<!-- プレビュー開始位置 (譜面一覧のサムネから流す位置) -->
+<div class="submitRow">
+  <label class="submitField">
+    <span class="submitLabel">
+      プレビュー開始位置 (秒)
+    </span>
+    <div class="previewTimeRow">
+      <div class="previewTimeField">
+        <!-- ブラウザ既定のスピナーは見た目が浮くので使わず、ツールと同じ ± ボタンにする -->
+        <input
+          type="text"
+          inputmode="decimal"
+          class="previewTimeInput"
+          bind:value={submit.previewTime}
+          placeholder={firstTagSec !== null ? firstTagSec.toFixed(2) : ""}
+          title="Enter でこの位置から再生"
+          onkeydown={(e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            playFromPreviewTime();
+          }}
+        />
+        <div class="previewStepper">
+          <button
+            type="button"
+            class="previewStepBtn"
+            onclick={() => stepPreview(0.05)}
+            aria-label="0.05秒増やす">▲</button
+          >
+          <button
+            type="button"
+            class="previewStepBtn"
+            onclick={() => stepPreview(-0.05)}
+            aria-label="0.05秒減らす">▼</button
+          >
+        </div>
+      </div>
+      <button
+        type="button"
+        class="previewTimeBtn"
+        onclick={() => (submit.previewTime = getPlayerTime().toFixed(2))}
+        title="プレイヤーの現在の再生位置を入れる">現在位置</button
+      >
+    </div>
+  </label>
+</div>
+
 <!-- タグ -->
 <div class="submitField">
   <span class="submitLabel">タグ</span>
@@ -238,6 +318,93 @@
   .loadYtBtn:hover {
     background: #e00;
   }
+  /* プレビュー開始位置。狭幅でも 1 行を保つため入力側だけ縮ませる */
+  .previewTimeRow {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    min-width: 0;
+  }
+  .previewTimeField {
+    display: flex;
+    align-items: stretch;
+    flex: 1 1 auto;
+    min-width: 0;
+    background: #111;
+    border: 1px solid #444;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .previewTimeField:focus-within {
+    border-color: #6a6d74;
+  }
+  .previewTimeInput {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 4px 8px;
+    background: transparent;
+    color: #ddd;
+    border: none;
+    font: inherit;
+    font-size: 12px;
+    text-align: right;
+    /* 桁数が変わっても数字の位置が動かないようにする */
+    font-variant-numeric: tabular-nums;
+  }
+  .previewTimeInput:focus {
+    outline: none;
+  }
+  .previewStepper {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+    border-left: 1px solid #333;
+  }
+  .previewStepBtn {
+    flex: 1;
+    width: 18px;
+    padding: 0;
+    background: transparent;
+    color: #9aa0a8;
+    border: none;
+    font-size: 7px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .previewStepBtn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+  }
+  .previewStepBtn + .previewStepBtn {
+    border-top: 1px solid #333;
+  }
+  .previewTimeBtn {
+    flex: 0 0 auto;
+    padding: 4px 8px;
+    background: transparent;
+    color: #d0d0d0;
+    border: 1px solid #4a4d54;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  }
+  .previewTimeBtn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: #6a6d74;
+    color: #fff;
+  }
+  .previewTimeBtn:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
   /* 投稿フォーム */
   .submitField {
     display: flex;

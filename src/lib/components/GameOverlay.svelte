@@ -1,13 +1,22 @@
 <script lang="ts">
-  import { ChartGame } from "$lib/chart-game.ts";
-  import { stripUntypeable } from "$lib/parseLyric/char-class.ts";
+  import { ChartGame, type MatchStatus } from "$lib/chart-game.ts";
+  import { normalizeJoinChar } from "$lib/parseLyric/char-class.ts";
+  import AudioVisualizer from "./AudioVisualizer.svelte";
+  import { lyricDelayHint } from "../../store.ts";
   import type { Snippet } from "svelte";
 
   let {
     resultActions,
     controlBar,
     showScrollHint = true,
-  }: { resultActions: Snippet; controlBar?: Snippet; showScrollHint?: boolean } = $props();
+    showVisualizer = false,
+  }: {
+    resultActions: Snippet;
+    controlBar?: Snippet;
+    showScrollHint?: boolean;
+    /** 音声スペクトラムを play-box 下部に出す (mp3 / mp4 のみ。YouTube は解析不可) */
+    showVisualizer?: boolean;
+  } = $props();
 
   const {
     renderedLyrics,
@@ -19,6 +28,7 @@
     score,
     maxBaseScore,
     earnedBaseScore,
+    forfeitedBaseScore,
     typingSpeed,
     replayMode,
     replayUsername,
@@ -125,7 +135,20 @@
 
   const replayStreamTokens = $derived(toStreamTokens($replayKeyDisplayLog));
 
+  // 現在の理論上限スコア (満点 10000 から、取り返せなくなった分を引いた値)
+  const maxAchievable = $derived(
+    $maxBaseScore > 0
+      ? Math.floor(10000 - ($forfeitedBaseScore / $maxBaseScore) * 10000)
+      : 10000,
+  );
+
   let scrollHintShown = $state(true);
+
+  // ショートカット一覧の開閉 (コントロールバーの ? ボタンから制御する)
+  let showShortcuts = $state(false);
+  export function toggleShortcuts() {
+    showShortcuts = !showShortcuts;
+  }
 
   // Character-level progress using charGroups
   function charGroupPassedChars(
@@ -366,15 +389,21 @@
           <span class="cell-label">Score</span>
           <span class="cell-main-row">
             {#if $replayMode}
+              <!-- リプレイ: 現在 / 限界 / 最終 -->
               <span class="cell-value">
                 {Math.floor($score).toLocaleString()}<span class="replay-final"
-                  >/{Math.floor($replayFinalScore).toLocaleString()}</span
+                  >/{maxAchievable.toLocaleString()}/{Math.floor(
+                    $replayFinalScore,
+                  ).toLocaleString()}</span
                 >
               </span>
             {:else}
-              <span class="cell-value"
-                >{Math.floor($score).toLocaleString()}</span
-              >
+              <!-- プレイ中: 現在 / 現時点で到達可能な上限 -->
+              <span class="cell-value">
+                {Math.floor($score).toLocaleString()}<span class="replay-final"
+                  >/{maxAchievable.toLocaleString()}</span
+                >
+              </span>
             {/if}
           </span>
         </div>
@@ -387,230 +416,277 @@
           </span>
         </div>
       </div>
-      <div id="lyrics">
-        {#each lyricSlotsFn($renderedLyrics) as line, slotIdx (line?.line ?? -(slotIdx + 1))}
-          <div
-            class="lyric-line"
-            class:empty={!line}
-            class:finished={line?.isFinished}
-            class:preview={line?.isPreview}
-          >
-            {#if line}
-              {#each line.items as item}
-                <div
-                  class="lyric-wrapper"
-                  class:cleared={item.isCleared}
-                  use:measurePhraseWidth={item.isCleared}
-                >
-                  {#if item.data.phrase.trim() === ""}
-                    {#each item.data.phrase as char}
-                      {#if char === "　"}<span class="zs"></span>
-                      {:else if char === " "}<span class="hs"></span>
-                      {/if}
-                    {/each}
-                  {:else}
-                    {@const phraseHasRuby = item.data.segments.some((s) => s.text !== s.reading || s.explicit)}
-                    <div
-                      class="phrase"
-                      class:waiting={$currentTime < item.data.time}
-                    >
-                      {#each item.data.segments as seg, segIdx}
-                        {@const chunks = item.segmentStatuses[segIdx] || []}
-                        {@const text = seg.text}
-                        {@const reading = seg.reading}
-                        {@const is1to1Mode =
-                          text.length === reading.length &&
-                          !/[一-鿿]/.test(text)}
+      <!-- ビジュアライザは音量バー〜シークバーの全域の背面に敷く -->
+      {#if showVisualizer}
+        <AudioVisualizer />
+      {/if}
+      <!-- 歌詞 / 入力 / next -->
+      <div class="stage">
+          <div id="lyrics">
+          {#each lyricSlotsFn($renderedLyrics) as line, slotIdx (line?.line ?? -(slotIdx + 1))}
+            <div
+              class="lyric-line"
+              class:empty={!line}
+              class:finished={line?.isFinished}
+              class:preview={line?.isPreview}
+            >
+              {#if line}
+                {#each line.items as item}
+                  <div
+                    class="lyric-wrapper"
+                    class:cleared={item.isCleared}
+                    use:measurePhraseWidth={item.isCleared}
+                  >
+                    {#if item.data.phrase.trim() === ""}
+                      {#each item.data.phrase as char}
+                        {#if char === "　"}<span class="zs"></span>
+                        {:else if char === " "}<span class="hs"></span>
+                        {/if}
+                      {/each}
+                    {:else}
+                      {@const phraseHasRuby = item.data.segments.some((s) => s.text !== s.reading || s.explicit)}
+                      <div
+                        class="phrase"
+                        class:waiting={$currentTime < item.data.time}
+                      >
+                        {#each item.data.segments as seg, segIdx}
+                          {@const chunks = item.segmentStatuses[segIdx] || []}
+                          {@const text = seg.text}
+                          {@const reading = seg.reading}
+                          {@const is1to1Mode =
+                            text.length === reading.length &&
+                            !/[一-鿿]/.test(text)}
 
-                        {#if is1to1Mode}
-                          {@const normalizedCharStatuses = (() => {
-                            const result: {
-                              status: "text" | "reading";
-                              len: number;
-                              committed?: boolean;
-                            }[] = [];
-                            for (const chunk of chunks) {
-                              for (let k = 0; k < chunk.len; k++) {
-                                result.push(chunk);
-                              }
-                            }
-                            return result;
-                          })()}
-                          {@const renderedChars = (() => {
-                            const chars: {
-                              tChar: string;
-                              rChar: string;
-                              chunk: {
-                                status: "text" | "reading";
+                          {#if is1to1Mode}
+                            {@const normalizedCharStatuses = (() => {
+                              const result: {
+                                status: MatchStatus;
                                 len: number;
                                 committed?: boolean;
-                              } | null;
-                              needsRuby: boolean;
-                            }[] = [];
-                            let normIdx = 0;
-                            for (let i = 0; i < text.length; i++) {
-                              const tChar = text[i];
-                              const rChar = reading[i];
-                              const isSymbol =
-                                stripUntypeable(tChar) === "";
-                              let chunk: {
-                                status: "text" | "reading";
-                                len: number;
-                                committed?: boolean;
-                              } | null = null;
-                              if (!isSymbol) {
-                                if (normIdx < normalizedCharStatuses.length) {
-                                  chunk = normalizedCharStatuses[normIdx];
-                                  normIdx++;
+                              }[] = [];
+                              for (const chunk of chunks) {
+                                for (let k = 0; k < chunk.len; k++) {
+                                  result.push(chunk);
                                 }
                               }
-                              chars.push({
-                                tChar,
-                                rChar,
-                                chunk,
-                                needsRuby: tChar !== rChar,
-                              });
-                            }
-                            return chars;
-                          })()}
+                              return result;
+                            })()}
+                            {@const renderedChars = (() => {
+                              const chars: {
+                                tChar: string;
+                                rChar: string;
+                                chunk: {
+                                  status: MatchStatus;
+                                  len: number;
+                                  committed?: boolean;
+                                } | null;
+                                isTypeable: boolean;
+                                typeableSpace: boolean;
+                                needsRuby: boolean;
+                              }[] = [];
+                              // normalizedText は text の部分列 (英文中の半角スペース・'
+                              // も残る) なので、前から順に突き合わせれば
+                              // 「この文字が打鍵対象か」がそのまま判る
+                              const nt = seg.normalizedText;
+                              let normIdx = 0;
+                              for (let i = 0; i < text.length; i++) {
+                                const tChar = text[i];
+                                const rChar = reading[i];
+                                // ’ ‘ → ' 、NBSP/全角スペース → 半角スペース
+                                const mapped = normalizeJoinChar(tChar);
+                                const isTypeable =
+                                  normIdx < nt.length && nt[normIdx] === mapped;
+                                let chunk: {
+                                  status: MatchStatus;
+                                  len: number;
+                                  committed?: boolean;
+                                } | null = null;
+                                if (isTypeable) {
+                                  if (normIdx < normalizedCharStatuses.length) {
+                                    chunk = normalizedCharStatuses[normIdx];
+                                  }
+                                  normIdx++;
+                                }
+                                chars.push({
+                                  tChar,
+                                  rChar,
+                                  chunk,
+                                  isTypeable,
+                                  // 打鍵対象のスペースは「皿」マーカーを出す
+                                  typeableSpace: isTypeable && mapped === " ",
+                                  needsRuby: tChar !== rChar,
+                                });
+                              }
+                              return chars;
+                            })()}
 
-                          {#each renderedChars as { tChar, rChar, chunk, needsRuby }, charIdx}{#if needsRuby || (!phraseHasRuby && segIdx === 0 && charIdx === 0)}<ruby
-                                class:committed={chunk?.committed}
-                                ><span
+                            {#each renderedChars as { tChar, rChar, chunk, isTypeable, typeableSpace, needsRuby }, charIdx}{#if needsRuby || (!phraseHasRuby && segIdx === 0 && charIdx === 0)}<ruby
+                                  class:committed={chunk?.committed}
+                                  ><span
+                                    class="char-span"
+                                    class:text-match={chunk?.status === "text"}
+                                    class:reading-match={chunk?.status !== undefined &&
+                                      chunk.status !== "text"}
+                                    data-space={!isTypeable && normalizeJoinChar(tChar) === ' ' ? '' : undefined}
+                                    class:typeable-space={typeableSpace}>{tChar}</span
+                                  ><rt
+                                    class:text-match={chunk?.status === "text"}
+                                    class:reading-match={chunk?.status !== undefined &&
+                                      chunk.status !== "text"}
+                                    class:committed={chunk?.committed}
+                                    class:hidden-rt={!needsRuby}>{needsRuby ? rChar : tChar}</rt
+                                  ></ruby
+                                >{:else}<span
                                   class="char-span"
                                   class:text-match={chunk?.status === "text"}
-                                  class:reading-match={chunk?.status ===
-                                    "reading"}
-                                  data-space={tChar === ' ' || tChar === '　' ? '' : undefined}>{tChar}</span
-                                ><rt
-                                  class:text-match={chunk?.status === "text"}
-                                  class:reading-match={chunk?.status ===
-                                    "reading"}
+                                  class:reading-match={chunk?.status !== undefined &&
+                                    chunk.status !== "text"}
                                   class:committed={chunk?.committed}
-                                  class:hidden-rt={!needsRuby}>{needsRuby ? rChar : tChar}</rt
-                                ></ruby
-                              >{:else}<span
+                                  data-space={!isTypeable && normalizeJoinChar(tChar) === ' ' ? '' : undefined}
+                                    class:typeable-space={typeableSpace}>{tChar}</span
+                                >{/if}{/each}
+                          {:else}<!-- Kanji Mode (Atomic) -->{@const status =
+                              chunks.find((s) => s.status !== "text") ||
+                              chunks[0] ||
+                              null}<ruby
+                              ><span
                                 class="char-span"
-                                class:text-match={chunk?.status === "text"}
-                                class:reading-match={chunk?.status ===
-                                  "reading"}
-                                class:committed={chunk?.committed}
-                                data-space={tChar === ' ' || tChar === '　' ? '' : undefined}>{tChar}</span
-                              >{/if}{/each}
-                        {:else}<!-- Kanji Mode (Atomic) -->{@const status =
-                            chunks.find((s) => s.status === "reading") ||
-                            chunks[0] ||
-                            null}<ruby
-                            ><span
-                              class="char-span"
-                              class:text-match={status?.status === "text"}
-                              class:reading-match={status?.status === "reading"}
-                              class:committed={status?.committed}>{text}</span
-                            >{#if text !== reading || seg.explicit}<rt
                                 class:text-match={status?.status === "text"}
-                                class:reading-match={status?.status ===
-                                  "reading"}
-                                class:committed={status?.committed}
-                                >{reading}</rt
-                              >{:else if !phraseHasRuby && segIdx === 0}<rt class="hidden-rt">{text}</rt>{/if}</ruby
-                          >{/if}
-                      {/each}
+                                class:reading-match={status?.status !== undefined &&
+                                  status.status !== "text"}
+                                class:committed={status?.committed}>{text}</span
+                              >{#if text !== reading || seg.explicit}<rt
+                                  class:text-match={status?.status === "text"}
+                                  class:reading-match={status?.status !== undefined &&
+                                    status.status !== "text"}
+                                  class:committed={status?.committed}
+                                  >{reading}</rt
+                                >{:else if !phraseHasRuby && segIdx === 0}<rt class="hidden-rt">{text}</rt>{/if}</ruby
+                            >{/if}
+                        {/each}
 
-                      <!-- Progress Bar -->
-                      <div
-                        class="phrase-progress"
-                        class:inactive={$currentTime < item.data.time}
-                        class:finished={item.data.endTime <= $currentTime}
-                        use:progressPx={charGroupPassedChars(
-                          item.data.charGroups,
-                          item.data.endTime,
-                          $currentTime,
-                        )}
-                      ></div>
-                      {#if $currentTime < item.data.time}
+                        <!-- Progress Bar -->
                         <div
-                          class="waiting-progress"
-                          style="width: {Math.min(
-                            100,
-                            Math.max(0, (item.data.time - $currentTime) * 100),
-                          )}%"
+                          class="phrase-progress"
+                          class:inactive={$currentTime < item.data.time}
+                          class:finished={item.data.endTime <= $currentTime}
+                          use:progressPx={charGroupPassedChars(
+                            item.data.charGroups,
+                            item.data.endTime,
+                            $currentTime,
+                          )}
                         ></div>
-                      {/if}
-                    </div>
+                        {#if $currentTime < item.data.time}
+                          <div
+                            class="waiting-progress"
+                            style="width: {Math.min(
+                              100,
+                              Math.max(0, (item.data.time - $currentTime) * 100),
+                            )}%"
+                          ></div>
+                        {/if}
+                      </div>
 
-                    {#if item.data.phrase.endsWith(" ")}<span class="hs"
-                      ></span>{/if}
-                    {#if item.data.phrase.endsWith("　")}<span class="zs"
-                      ></span>{/if}
+                      <!-- フレーズ末尾の区切りスペース用スペーサー。
+                           打鍵対象のスペース (英単語の区切り) はフレーズ内に
+                           文字として描画済みなので、二重に空けない。 -->
+                      {@const trailingSpaceTyped =
+                        item.data.segments[item.data.segments.length - 1]
+                          ?.normalizedText.endsWith(" ") ?? false}
+                      {#if !trailingSpaceTyped}
+                        {#if item.data.phrase.endsWith(" ")}<span class="hs"
+                          ></span>{/if}
+                        {#if item.data.phrase.endsWith("　")}<span class="zs"
+                          ></span>{/if}
+                      {/if}
+                    {/if}
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          {/each}
+        </div>
+        <div id="input-area" class:replay={$replayMode}>
+          <div class="input-wrapper">
+            {#if $lyricDelayHint !== null}
+              <!-- Ctrl+←→ で歌詞タイミングを変更した直後の一時表示 -->
+              <div class="delay-hint" aria-hidden="true">
+                {$lyricDelayHint >= 0 ? '+' : ''}{$lyricDelayHint.toFixed(2)}s
+              </div>
+            {/if}
+            {#if !$replayMode && $renderedLyrics.every( (l) => l.items.every((item) => item.isCleared || item.data.phrase.trim() === ""), ) && ($nextLines.length === 0 || $nextLines[0].startTime - $currentTime > 0.5)}
+              <div class="skip-hint" aria-hidden="true">
+                <span class="skip-arrow">></span><span class="skip-arrow">></span
+                ><span class="skip-arrow">></span><span class="skip-text"
+                  ><kbd>Shift + Enter</kbd></span
+                >
+              </div>
+            {/if}
+            {#if $replayMode}
+              <div
+                id="text-input"
+                class="replay-key-stream"
+                class:dimmed={$replayKeyDisplayDimmed}
+              >
+                {#each replayStreamTokens as token}
+                  {#if token.kind === "text"}
+                    <span class="key-text">{token.str}</span>
+                  {:else}
+                    <span class="key-token" class:repeat={token.repeat}>
+                      {#if token.isClick}
+                        <svg
+                          viewBox="0 0 16 16"
+                          width="12"
+                          height="12"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M2 1 L2 12 L5 9 L7 14 L9 13 L7 8 L11 8 Z"
+                            fill="currentColor"
+                            stroke="currentColor"
+                            stroke-width="0.5"
+                            stroke-linejoin="round"
+                          />
+                        </svg>
+                      {:else}
+                        {token.label}
+                      {/if}
+                      {#if token.count > 1}
+                        <span class="key-count">×{token.count}</span>
+                      {/if}
+                    </span>
                   {/if}
-                </div>
-              {/each}
+                {/each}
+              </div>
+            {:else}
+              <!-- ブラウザのフォーム履歴 (「保存された情報」) やスペルチェックが
+                   入力欄に被るのを抑止する。IME の変換候補は OS 側なので対象外。 -->
+              <input
+                id="text-input"
+                type="text"
+                autocomplete="off"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                data-form-type="other"
+                data-lpignore="true"
+                data-1p-ignore
+              />
             {/if}
           </div>
-        {/each}
-      </div>
-      <div id="input-area" class:replay={$replayMode}>
-        <div class="input-wrapper">
-          {#if !$replayMode && $renderedLyrics.every( (l) => l.items.every((item) => item.isCleared || item.data.phrase.trim() === ""), ) && ($nextLines.length === 0 || $nextLines[0].startTime - $currentTime > 0.5)}
-            <div class="skip-hint" aria-hidden="true">
-              <span class="skip-arrow">></span><span class="skip-arrow">></span
-              ><span class="skip-arrow">></span><span class="skip-text"
-                ><kbd>Shift + Enter</kbd></span
-              >
-            </div>
-          {/if}
-          {#if $replayMode}
-            <div
-              id="text-input"
-              class="replay-key-stream"
-              class:dimmed={$replayKeyDisplayDimmed}
+        </div>
+        <div class="next-line-info">
+          {#if $nextLines.length > 0}
+            <span class="next-line-countdown"
+              >{Math.max(0, $nextLines[0].startTime - $currentTime).toFixed(
+                1,
+              )}s</span
             >
-              {#each replayStreamTokens as token}
-                {#if token.kind === "text"}
-                  <span class="key-text">{token.str}</span>
-                {:else}
-                  <span class="key-token" class:repeat={token.repeat}>
-                    {#if token.isClick}
-                      <svg
-                        viewBox="0 0 16 16"
-                        width="12"
-                        height="12"
-                        aria-hidden="true"
-                      >
-                        <path
-                          d="M2 1 L2 12 L5 9 L7 14 L9 13 L7 8 L11 8 Z"
-                          fill="currentColor"
-                          stroke="currentColor"
-                          stroke-width="0.5"
-                          stroke-linejoin="round"
-                        />
-                      </svg>
-                    {:else}
-                      {token.label}
-                    {/if}
-                    {#if token.count > 1}
-                      <span class="key-count">×{token.count}</span>
-                    {/if}
-                  </span>
-                {/if}
-              {/each}
-            </div>
-          {:else}
-            <input id="text-input" type="text" />
+            <span class="next-line-text"
+              >{$nextLines.map((n) => n.text.trim()).join(" / ")}</span
+            >
           {/if}
         </div>
-      </div>
-      <div class="next-line-info">
-        {#if $nextLines.length > 0}
-          <span class="next-line-countdown"
-            >{Math.max(0, $nextLines[0].startTime - $currentTime).toFixed(
-              1,
-            )}s</span
-          >
-          <span class="next-line-text"
-            >{$nextLines.map((n) => n.text.trim()).join(" / ")}</span
-          >
-        {/if}
       </div>
       <div id="progress-wrapper">
         <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -692,9 +768,114 @@
       </div>
     </div>
   {/if}
+
+  <!-- ショートカット一覧 (コントロールバーの ? から開く) -->
+  {#if showShortcuts}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="shortcutOverlay" onclick={() => (showShortcuts = false)}>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="shortcutPanel" onclick={(e) => e.stopPropagation()}>
+        <h3>ショートカットキー</h3>
+        <div class="shortcutGrid">
+          <div class="shortcutSection">
+            <h4>プレイ</h4>
+            <div><kbd>Esc</kbd> 一時停止 / 再開</div>
+            <div><kbd>F4</kbd> 最初からやり直す</div>
+            <div><kbd>Shift+Enter</kbd> 次のフレーズまでスキップ</div>
+            <div><kbd>Shift+→</kbd> 5秒進む</div>
+            <div>
+              <kbd>Shift+←</kbd> 5秒戻る（ローカル譜面・リプレイ）
+            </div>
+          </div>
+          <div class="shortcutSection">
+            <h4>設定</h4>
+            <div><kbd>Ctrl+↑</kbd>/<kbd>Ctrl+↓</kbd> 音量 ±5</div>
+            <div><kbd>Ctrl+Shift+↑</kbd>/<kbd>Ctrl+Shift+↓</kbd> 音量 ±1</div>
+            <div><kbd>Ctrl+→</kbd>/<kbd>Ctrl+←</kbd> 歌詞表示 ±0.05秒</div>
+            <div>
+              <kbd>Ctrl+Shift+→</kbd>/<kbd>Ctrl+Shift+←</kbd> 歌詞表示 ±0.01秒
+            </div>
+          </div>
+        </div>
+        <button class="shortcutCloseBtn" onclick={() => (showShortcuts = false)}
+          >閉じる</button
+        >
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
+  /* --- ショートカット一覧 (タイムタグエディタのパネルに合わせたデザイン) --- */
+  .shortcutOverlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .shortcutPanel {
+    background: #222;
+    border: 1px solid #555;
+    border-radius: 8px;
+    padding: 24px;
+    max-width: 600px;
+    width: 90%;
+    color: #eee;
+  }
+  .shortcutPanel h3 {
+    margin: 0 0 16px;
+    font-size: 16px;
+  }
+  .shortcutGrid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  @media (max-width: 560px) {
+    .shortcutGrid {
+      grid-template-columns: 1fr;
+    }
+  }
+  .shortcutSection h4 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: #8cf;
+  }
+  .shortcutSection div {
+    font-size: 12px;
+    color: #bbb;
+    padding: 2px 0;
+  }
+  .shortcutSection kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    margin-right: 2px;
+    font-family: inherit;
+    font-size: 0.92em;
+    color: #eee;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 4px;
+  }
+  .shortcutCloseBtn {
+    background: #333;
+    color: #ddd;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .shortcutCloseBtn:hover {
+    background: #444;
+  }
+
   /* --- Overlay control bar --- */
   #overlay-control {
     margin: -11px -18px 9px;
@@ -734,6 +915,22 @@
     isolation: isolate;
     position: relative;
     z-index: 5;
+  }
+
+  /* 歌詞 / 入力 / next をまとめる層 (レイアウトは素通し) */
+  .stage {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  /* ビジュアライザ canvas を #play-box 直下に絶対配置しているので、
+     中身側に position を持たせて前面に出す */
+  #play-box > #overlay-control,
+  #play-box > .status-main,
+  #play-box > .stage,
+  #play-box > #progress-wrapper {
+    position: relative;
+    z-index: 1;
   }
 
   /* --- Status (integrated) --- */
@@ -819,9 +1016,41 @@
       0 0 2px #00bcd4;
   }
 
+  /* 英単語間の打鍵対象スペース。スペースの位置に「皿」型のマーカーを出す。
+     overflow: hidden の inline-block はボックス下端がベースラインになる
+     (CSS 2.1 10.8.1) ので、皿の下辺をベースラインに正確に合わせられる。
+     vertical-align の負値でそこから更に下げている。
+     色は currentColor なので、打鍵すると他の文字と同じ一致色に変わる。 */
+  span.char-span.typeable-space {
+    position: relative;
+    display: inline-block;
+    box-sizing: border-box;
+    /* 送り幅は半角スペースのまま。皿はこの内側に描くので字送りは変わらない */
+    width: 0.5em;
+    height: 0.16em; /* = 両端の縦棒の長さ */
+    overflow: hidden;
+    vertical-align: -0.08em;
+  }
+  span.char-span.typeable-space::before {
+    content: "";
+    position: absolute;
+    /* 左右を内側に詰めて、隣の文字との間に余白を作る */
+    left: 0.06em;
+    right: 0.06em;
+    top: 0;
+    bottom: 0;
+    border: 1px solid currentColor;
+    border-top: none;
+  }
+
   span.reading-match {
     color: #b2ebf2;
     opacity: 0.7;
+  }
+  /* ふりがな。既定は親の 50% (1.54rem → 約0.77rem) なので少し小さくする。
+     DESIGN.md の下限 0.7rem は下回らない */
+  .phrase ruby rt {
+    font-size: 0.7rem;
   }
   .phrase ruby rt.text-match {
     color: #4dd0e1;
@@ -847,6 +1076,21 @@
   .input-wrapper {
     position: relative;
     width: 100%;
+  }
+
+  /* 歌詞タイミング変更時の一時表示 (入力欄の中央に控えめに重ねる) */
+  .delay-hint {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 3;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.9rem;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
 
   .skip-hint {
@@ -1014,6 +1258,7 @@
     font-weight: normal;
     margin-left: 2px;
   }
+
 
   #progress-wrapper {
     display: flex;
@@ -1285,6 +1530,9 @@
     align-items: center;
     color: white;
     margin: auto;
+    /* スクロール中に YouTube iframe との合成順が揺れて半透明背景の濃さが
+       変わって見える事例への予防 (#play-box と同じ対策) */
+    isolation: isolate;
   }
 
   .result-menu {

@@ -64,7 +64,7 @@ export const GET: RequestHandler = async ({ params, locals }) => {
 			prompt: `YouTube Data API snippet 由来のJSON(下記)のみを根拠に、譜面作成用情報を抽出する。
 
 出力はJSON文字列のみ(説明/Markdown/コードフェンス/改行は不可)。キーは固定:
-{"title":string,"artistName":string,"source":string,"otherTags":string[],"originalTitle":string,"isOfficialVideo":boolean,"isCover":boolean,"isMAD":boolean,"songLanguage":string}
+{"title":string,"artistName":string,"source":string,"otherTags":string[],"originalTitle":string,"isOfficialVideo":boolean,"isCover":boolean,"isMAD":boolean}
 
 規則:
 - title/artistName/source抽出優先: (1)「曲名 - アーティスト」「アーティスト - 曲名」等を分解 (2) 区切り文字(例:" - ","｜","|","／","/",":","：")で曲名らしい塊を選ぶ。
@@ -79,7 +79,6 @@ export const GET: RequestHandler = async ({ params, locals }) => {
 - isOfficialVideo: アーティスト本人または所属レーベル・公式チャンネルの投稿ならtrue。無断転載・ファンアップロード・非公式ならfalse。
 - isCover: 原曲の作者とは別のアーティストが歌唱・演奏したカバー曲ならtrue（公式チャンネルのセルフカバーを含む）。原曲本人の歌唱かつ本人チャンネルの投稿ならfalse。MAD・音MAD・メドレー・リミックスはカバーではないのでfalse。
 - isMAD: 音MAD・MAD動画・メドレー・リミックス・合作など、既存の音声・映像素材を組み合わせた二次創作動画ならtrue。通常のカバー曲・原曲・公式動画はfalse。
-- songLanguage: **この動画で実際に歌唱されている言語**を title/description/tags から推定する（元の曲の言語ではなく、この動画のパフォーマンスの言語）。値は以下の4択のみ: "ja"(日本語のみ)、"en"(英語のみ、または英語が主体。English coverのように日本語曲を全編英語で歌っている場合も"en")、"en-ja"(英語と日本語が混在し英語の割合が有意にある場合のみ。サビの一部など数語だけ英語が含まれる程度ならば"ja"とする)、"other"(その他/不明)。
 
 入力JSON:
 ${JSON.stringify(snippetForPrompt)}
@@ -96,7 +95,6 @@ ${JSON.stringify(snippetForPrompt)}
 			isOfficialVideo: boolean;
 			isCover: boolean;
 			isMAD: boolean;
-			songLanguage: string;
 		};
 
 		return json({
@@ -106,11 +104,10 @@ ${JSON.stringify(snippetForPrompt)}
 			suggestedTags: parsed.otherTags ?? [],
 			isOfficialVideo: parsed.isOfficialVideo ?? false,
 			isCover: parsed.isCover ?? false,
-			isMAD: parsed.isMAD ?? false,
-			songLanguage: parsed.songLanguage ?? 'other'
+			isMAD: parsed.isMAD ?? false
 		});
 	} catch (err) {
 		console.error('Gemini error:', err);
-		return json({ title: snippetForPrompt.title, artist: snippetForPrompt.channelTitle, source: '', suggestedTags: [], isOfficialVideo: false, isCover: false, isMAD: false, songLanguage: 'other' });
+		return json({ title: snippetForPrompt.title, artist: snippetForPrompt.channelTitle, source: '', suggestedTags: [], isOfficialVideo: false, isCover: false, isMAD: false });
 	}
 };

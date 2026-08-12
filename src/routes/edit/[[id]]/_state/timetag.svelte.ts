@@ -47,6 +47,9 @@ class TimeTagState {
 
   // ツール: 全タイムタグ調整
   toolTimeAdjustValue = $state(0);
+
+  /** タイムタグエディタ上に一時表示する操作結果 (P キーの結果通知など)。空で非表示 */
+  statusMsg = $state("");
 }
 
 export const tt = new TimeTagState();

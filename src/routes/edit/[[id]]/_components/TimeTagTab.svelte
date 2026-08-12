@@ -19,7 +19,7 @@
   import {
     buildKaraokeUnits,
     ttCharProgress,
-    ttRubyProgress,
+    ttRubyUnitProgress,
   } from "../_lib/timetag/karaoke";
   import { openRubyEdit } from "../_lib/timetag/ruby-edit";
 
@@ -39,27 +39,6 @@
     openImport,
     editorAreaEl = $bindable<HTMLElement | null>(null),
   }: Props = $props();
-
-  let ttTotalChecks = $derived(
-    tt.lines.reduce(
-      (sum, l) =>
-        sum + l.chars.reduce((s, c) => s + (c.checkCount > 0 ? 1 : 0), 0),
-      0,
-    ),
-  );
-  let ttTaggedCount = $derived(
-    tt.lines.reduce(
-      (sum, l) =>
-        sum +
-        l.chars.reduce(
-          (s, c) =>
-            s +
-            (c.checkCount > 0 && c.times[0] !== null ? 1 : 0),
-          0,
-        ),
-      0,
-    ),
-  );
 
   function handleAreaCopy(e: ClipboardEvent): void {
     const sel = window.getSelection();
@@ -157,8 +136,6 @@
         <span class="ttInfo"
           >[{formatTime(tt.displayTime)}]/[{formatTime(player.audioDuration)}]</span
         >
-        <span class="ttInfoSep">|</span>
-        <span class="ttInfo">{ttTaggedCount}/{ttTotalChecks}</span>
         <button
           class="ttBtn shortcutHelpBtn"
           onclick={() => (tt.showShortcuts = !tt.showShortcuts)}
@@ -166,6 +143,10 @@
         >
       </div>
     </div>
+
+    {#if tt.statusMsg}
+      <div class="ttStatusMsg" aria-live="polite">{tt.statusMsg}</div>
+    {/if}
 
     <div
       class="ttEditorArea"
@@ -247,7 +228,11 @@
                       ch.rubySpan ?? 1,
                       line.chars.length - ci,
                     )}
-                    {@const groupProgress = ttRubyProgress(
+                    <!-- ルビグループの塗り。カラオケユニット (行全体の時刻解決結果) を
+                         優先して使う。ttRubyProgress 単体だと、先頭記号「がタグを
+                         受け取ったケースで基礎文字側に時刻が無く 0 のままになる -->
+                    {@const groupProgress = ttRubyUnitProgress(
+                      karaokeUnits,
                       line,
                       ci,
                       tt.displayTime,
@@ -281,7 +266,8 @@
                           <div
                             class="ttCharCol ttCharInRubyGroup"
                             class:ttCharNoCheck={subCh.checkCount === 0}
-                            class:ttCharClickable={subCh.times[0] !== null}
+                            class:ttCharClickable={subCh.times[0] !== null ||
+                              subCh.blockTime !== undefined}
                             onclick={(ev) => {
                               tt.cursorLine = li;
                               tt.cursorChar = subCi;
@@ -289,9 +275,8 @@
                               if (ev.ctrlKey) openRubyEdit(li, subCi);
                             }}
                             ondblclick={() => {
-                              if (subCh.times[0] !== null) {
-                                playerSeek(subCh.times[0]!);
-                              }
+                              const t = subCh.times[0] ?? subCh.blockTime;
+                              if (t != null) playerSeek(t);
                             }}
                             role="button"
                             tabindex="-1"
@@ -333,7 +318,8 @@
                               >
                                 <polygon
                                   points="0,0 0,6 6,6"
-                                  fill={subCh.times[0] != null
+                                  fill={subCh.times[0] != null ||
+                                  subCh.blockTime !== undefined
                                     ? "#555"
                                     : "transparent"}
                                 />
@@ -395,7 +381,8 @@
                   <div
                     class="ttCharCol"
                     class:ttCharNoCheck={ch.checkCount === 0}
-                    class:ttCharClickable={ch.times[0] !== null}
+                    class:ttCharClickable={ch.times[0] !== null ||
+                      ch.blockTime !== undefined}
                     onclick={(ev) => {
                       tt.cursorLine = li;
                       tt.cursorChar = ci;
@@ -403,9 +390,8 @@
                       if (ev.ctrlKey) openRubyEdit(li, ci);
                     }}
                     ondblclick={() => {
-                      if (ch.times[0] !== null) {
-                        playerSeek(ch.times[0]!);
-                      }
+                      const t = ch.times[0] ?? ch.blockTime;
+                      if (t != null) playerSeek(t);
                     }}
                     role="button"
                     tabindex="-1"
@@ -485,7 +471,8 @@
                       >
                         <polygon
                           points="0,0 0,6 6,6"
-                          fill={ch.times[0] != null
+                          fill={ch.times[0] != null ||
+                          ch.blockTime !== undefined
                             ? "#555"
                             : "transparent"}
                         />
@@ -557,6 +544,7 @@
 
 <style>
   .ttContainer {
+    position: relative; /* ttStatusMsg の配置基準 (スクロールしない層) */
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -602,6 +590,30 @@
   }
 
   /* Editor Area */
+  /* 操作結果の一時通知 (P キーなど)。
+     スクロールする .ttEditorArea の中に置くと、下までスクロールした状態では
+     内容と一緒に上へ流れて画面外になる。スクロールしない .ttContainer 基準で置く */
+  .ttStatusMsg {
+    position: absolute;
+    bottom: 12px;
+    right: 14px;
+    z-index: 5;
+    padding: 4px 10px;
+    background: rgba(0, 0, 0, 0.8);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-size: 0.72rem;
+    pointer-events: none;
+    animation: ttStatusIn 0.12s ease-out;
+  }
+  @keyframes ttStatusIn {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+
   .ttEditorArea {
     flex: 1;
     overflow-y: auto;
@@ -682,9 +694,6 @@
   }
   .ttCharClickable {
     cursor: pointer;
-  }
-  .ttCharClickable:hover {
-    background: rgba(0, 112, 243, 0.15);
   }
   .ttRuby {
     font-size: 10px;

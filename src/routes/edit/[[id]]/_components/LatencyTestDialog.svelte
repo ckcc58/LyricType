@@ -43,9 +43,12 @@
           : "適用値: ---"}
       </div>
       <div class="latencyCurrentOffset">
-        現在の補正: {$settings.timeOffset >= 0
-          ? "+"
-          : ""}{$settings.timeOffset.toFixed(2)}s
+        <!-- 「適用値」と同じく、タグに適用される補正量 (遅れ分マイナス) で表示する -->
+        現在の補正: {$settings.timeOffset > 0
+          ? "-"
+          : $settings.timeOffset < 0
+            ? "+"
+            : ""}{Math.abs($settings.timeOffset).toFixed(2)}s
       </div>
       <div class="latencyActions">
         <button

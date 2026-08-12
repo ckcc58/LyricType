@@ -2,7 +2,33 @@
 import { chart } from "../../_state/chart.svelte";
 import { submit } from "../../_state/submit.svelte";
 import { tt } from "../../_state/timetag.svelte";
-import { getLrcForSave } from "../lrc/serialize";
+import { player } from "../../_state/player.svelte";
+import { getLrcForSubmit } from "../lrc/serialize";
+
+/** プレイヤーから実曲長 (秒) を取得。未ロード時は undefined (サーバ側で歌詞末尾から近似) */
+function getMediaDurationSec(): number | undefined {
+  let d = 0;
+  if (player.audioMode === "youtube") {
+    d = player.ytPlayer?.getDuration?.() ?? 0;
+  }
+  if (!(d > 0)) d = player.audioDuration;
+  return Number.isFinite(d) && d > 0 ? d : undefined;
+}
+
+/**
+ * 投稿するプレビュー開始位置 (秒)。
+ * 入力が数値でなければ (空欄・不正値) 歌詞の最初のタイムタグ時刻を使う。
+ * タイムタグも無ければ undefined を返し、サーバ側の既定に委ねる。
+ */
+function getPreviewTimeSec(): number | undefined {
+  const v = Number(submit.previewTime.trim());
+  if (Number.isFinite(v) && v >= 0 && submit.previewTime.trim() !== "") {
+    return Math.round(v * 100) / 100;
+  }
+  const m = chart.lrcContent.match(/\[(\d\d):(\d\d):(\d\d)\]/);
+  if (!m) return undefined;
+  return Math.round((+m[1] * 60 + +m[2] + +m[3] / 100) * 100) / 100;
+}
 
 /** tt.lines の time タグ位置を軽量に文字列化 (timetag 変更検知用) */
 function ttLinesSignature(): string {
@@ -28,6 +54,7 @@ export function buildSubmitSnapshot(): string {
     description: submit.description,
     yt: submit.ytVideoId,
     source: submit.source,
+    previewTime: submit.previewTime,
     tags: submit.tags,
   });
 }
@@ -58,7 +85,8 @@ export async function submitChart(cb: TtRegenCallbacks): Promise<void> {
   cb.syncLrcToTimeTagLines();
   cb.generateTtLrc();
 
-  const lrcRaw = getLrcForSave();
+  // DB にはヘッダ/フッタを含めない従来形式 (@ytid + 本体) で投稿する
+  const lrcRaw = getLrcForSubmit();
   if (!lrcRaw.trim()) {
     submit.submitError = "LRCデータがありません";
     submit.isSubmitting = false;
@@ -82,6 +110,8 @@ export async function submitChart(cb: TtRegenCallbacks): Promise<void> {
         youtube_video_id: submit.ytVideoId || undefined,
         source: submit.source,
         tags: submit.tags,
+        duration_seconds: getMediaDurationSec(),
+        preview_time: getPreviewTimeSec(),
       }),
     });
 

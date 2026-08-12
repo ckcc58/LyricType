@@ -96,9 +96,14 @@
 									class:active={sortKey === col.key}
 									onclick={() => toggleSort(col.key)}
 								>
-									<span class="sort-label">{col.label}</span><span class="sort-ind"
-										>{sortKey === col.key ? (sortDir === 'desc' ? '▼' : '▲') : ''}</span
-									>
+									<span class="sort-label">{col.label}</span
+									><span class="sort-ind" aria-hidden="true">
+										{#if sortKey === col.key}
+											<!-- ▲▼ を縦に並べ、現在の向きだけ明るくする -->
+											<span class="sort-arrow" class:on={sortDir === 'asc'}>▲</span>
+											<span class="sort-arrow" class:on={sortDir === 'desc'}>▼</span>
+										{/if}
+									</span>
 								</button>
 							</th>
 						{/each}
@@ -264,13 +269,24 @@
 		background: rgba(255, 255, 255, 0.12);
 		color: #fff;
 	}
-	/* 並び替え方向の矢印。常に幅を確保して列幅が動かないようにする */
+	/* 並び替え方向の矢印。▲▼ を縦に並べ、常に幅を確保して列幅が動かないようにする */
 	.sort-ind {
-		display: inline-block;
+		display: inline-flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
 		width: 1em;
 		margin-left: 4px;
+		vertical-align: middle;
 		font-size: 0.6rem;
-		text-align: center;
+		line-height: 1;
+	}
+	.sort-arrow {
+		/* 非選択の向きは薄く残して、クリックで切り替わることを示す */
+		color: #777;
+	}
+	.sort-arrow.on {
+		color: #fff;
 	}
 	/* 並び替え中の列ヘッダーは下線を明るくして「この列」と分かるようにする */
 	thead th.active {

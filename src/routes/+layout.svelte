@@ -1,7 +1,14 @@
 <script lang="ts">
   import { page, navigating } from '$app/state';
   import type { Snippet } from 'svelte';
-  import { settings, updateSetting } from '$lib/settings';
+  import { fly } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
+  import {
+    settings,
+    updateSetting,
+    LYRIC_DELAY_MIN,
+    LYRIC_DELAY_MAX,
+  } from '$lib/settings';
   import { FONT_OPTIONS, fontStack, GOOGLE_FONTS_HREF } from '$lib/fonts';
   import { volume } from '../store';
   import { QueryClientProvider } from '@tanstack/svelte-query';
@@ -122,7 +129,12 @@
 
 <QueryClientProvider client={queryClient}>
 <div class="appLayout">
-  <nav class="sidebar">
+  <!-- サイドバー内のどこをクリックしても設定を閉じる。
+       歯車ボタンだけは自前でトグルするため stopPropagation する。
+       (各項目はボタン/リンクでキーボード操作可能なので click 補助のみ) -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <nav class="sidebar" onclick={() => (showSettings = false)}>
     <!-- Auth: top of sidebar -->
     {#if data.profile}
       <a href="/user" class="navItem authItem" title={data.profile.name}>
@@ -173,7 +185,10 @@
       class="navItem settingsBtn"
       class:active={showSettings}
       title="設定"
-      onclick={() => showSettings = !showSettings}
+      onclick={(e) => {
+        e.stopPropagation(); // nav の「閉じる」ハンドラに飲まれないように
+        showSettings = !showSettings;
+      }}
     >
       <svg class="navIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         {@html gearIcon}
@@ -185,7 +200,12 @@
   {#if showSettings}
     <div class="settingsOverlay" onclick={() => showSettings = false} role="presentation"></div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="settingsPanel" onclick={(e) => e.stopPropagation()} onmousedown={(e) => e.stopPropagation()}>
+    <div
+      class="settingsPanel"
+      transition:fly={{ x: -280, duration: 220, easing: cubicOut, opacity: 1 }}
+      onclick={(e) => e.stopPropagation()}
+      onmousedown={(e) => e.stopPropagation()}
+    >
       <div class="settingsTitle">設定</div>
 
       <div class="settingGroup">
@@ -196,6 +216,28 @@
           oninput={(e) => updateSetting('volume', +(e.currentTarget as HTMLInputElement).value)}
           class="settingSlider"
         />
+      </div>
+
+      <div class="settingGroup">
+        <label class="settingLabel" for="lyricDelaySlider"
+          >歌詞表示タイミング調整: {$settings.lyricDelay >= 0
+            ? '+'
+            : ''}{$settings.lyricDelay.toFixed(2)}s</label
+        >
+        <input
+          id="lyricDelaySlider"
+          type="range"
+          min={LYRIC_DELAY_MIN}
+          max={LYRIC_DELAY_MAX}
+          step="0.01"
+          value={$settings.lyricDelay}
+          oninput={(e) =>
+            updateSetting('lyricDelay', +(e.currentTarget as HTMLInputElement).value)}
+          class="settingSlider"
+        />
+        <div class="settingHint">
+          プレイ中、歌詞の表示タイミングを調整します。
+        </div>
       </div>
 
       <div class="settingGroup">
@@ -271,6 +313,7 @@
     --text-muted: #aaa;
     --accent: #4a9eff;
     --accent-game: #4dd0e1;
+    --accent-english: #fc7ca1; /* 英語譜面 (英字9割以上) の識別色 */
     --danger: #ff6b6b;
     --warn: #ffa726;
     --success: #4caf50;
@@ -282,8 +325,8 @@
     padding: 0;
     overflow: hidden;
     background: #0d0d0d;
-    /* 既定は M PLUS 1。設定で選ぶと --app-font が上書きする（fonts.ts / 設定パネル参照） */
-    font-family: var(--app-font, "M PLUS 1", "Hiragino Sans", "Yu Gothic UI", Meiryo, Tahoma, sans-serif);
+    /* 既定はブラウザ既定フォント。設定で選ぶと --app-font が上書きする（fonts.ts / 設定パネル参照） */
+    font-family: var(--app-font, sans-serif);
   }
 
   /* フォームコントロールは body のフォントを継承しないため明示 */
@@ -437,7 +480,8 @@
   .settingsOverlay {
     position: fixed;
     inset: 0;
-    z-index: 99;
+    /* パネル (98) より後ろ。パネル上のクリックを奪わないようにする */
+    z-index: 97;
   }
 
   .settingsPanel {
@@ -449,7 +493,8 @@
     background: #1e1e1e;
     border-right: 1px solid #333;
     padding: 16px;
-    z-index: 101;
+    /* サイドバー (z-index:100) より後ろ。パネルがサイドバーの下から滑り出す */
+    z-index: 98;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -469,10 +514,23 @@
     gap: 8px;
   }
 
+  /* 項目間の細い区切り線 (最初の項目の上には引かない) */
+  .settingGroup + .settingGroup {
+    border-top: 1px solid rgba(255, 255, 255, 0.2);
+    padding-top: 16px;
+  }
+
   .settingLabel {
     color: #aaa;
     font-size: 13px;
   }
+
+  .settingHint {
+    color: #aaa;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+
 
   .settingSlider {
     width: 100%;

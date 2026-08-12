@@ -281,9 +281,11 @@ export function buildTimeTagData(
           pendingTime = null;
         }
 
-        // checkCount=0 の非スペース文字が pendingTime を持つ → blockTime として保存
+        // checkCount=0 の非スペース文字が pendingTime を持つ → blockTime として保存。
+        // 促音も対象にする (除外すると「、[t]って」のタグが て 側へ流れ、
+        // 往復で「、っ[t]て」に化ける)。
         let charBlockTime: number | undefined;
-        if (!isSpaceChar && !isSokuon && pendingTime !== null && checkCount === 0) {
+        if (!isSpaceChar && pendingTime !== null && checkCount === 0) {
           charBlockTime = pendingTime;
           pendingTime = null;
         }
@@ -306,8 +308,10 @@ export function buildTimeTagData(
     // チェックを「全て」借りる (熟字訓と同じく、先頭にまとめて後続は checkCount=0)。
     const alphaNumRegex = /[a-zA-Zａ-ｚＡ-Ｚ0-9０-９''']/;
     for (let ci = 0; ci < chars.length; ci++) {
-      // 行頭 or スペース直後の位置か判定
-      const isStartPos = ci === 0 || /[\s　]/.test(chars[ci - 1].char);
+      // 行頭 or フレーズ区切り直後の位置か判定。
+      // 区切りはゲーム側 parse-chart の splitReg /([、。\s])/ と揃える
+      // (読点・句点の直後もゲームでは新フレーズの先頭になるため)。
+      const isStartPos = ci === 0 || /[\s　、。]/.test(chars[ci - 1].char);
       if (!isStartPos) continue;
       // スペースはスキップして最初の非空白文字を探す
       let targetIdx = -1;
@@ -324,10 +328,16 @@ export function buildTimeTagData(
       ) {
         for (let ni = targetIdx + 1; ni < chars.length; ni++) {
           if (chars[ni].checkCount >= 1) {
-            // 借りる文字 (ni) の checkCount/times のみを先頭記号へ移す。
+            // 借りる文字 (ni) の checkCount (チェック枠) のみを先頭記号へ移す。
             // 読み (reading) は元の文字に残す（記号側にルビを付けない）。
+            // 既に打たれていたタイムタグも元の文字の blockTime として残し、
+            // LRC 上のタグ位置を変えない（「[t]春 → [t]「春 と移動させない）。
+            const firstTag = chars[ni].times.find((t) => t !== null);
             chars[targetIdx].checkCount = chars[ni].checkCount;
-            chars[targetIdx].times = [...chars[ni].times];
+            chars[targetIdx].times = Array(chars[ni].checkCount).fill(null);
+            if (firstTag !== undefined && firstTag !== null) {
+              chars[ni].blockTime = firstTag;
+            }
             chars[ni].checkCount = 0;
             chars[ni].times = [];
             break;
@@ -336,27 +346,25 @@ export function buildTimeTagData(
       }
     }
 
-    // Post-process 2: 英単語間スペースの hideEndMark
+    // Post-process 2/3: 英単語間スペースの hideEndMark と isEndCheck。
+    // 両者は同じ「英単語の間か」の判定を共有する必要がある。
+    // (以前は hideEndMark が「前後とも日本語でない」、isEndCheck が「前後とも英数字」
+    //  という別基準で、記号を挟むと「endTime は打てるのにマークが見えない」ズレが出た)
+    const isAlphaRe = /^[a-zA-Zａ-ｚＡ-Ｚ0-9０-９'',.]$/;
+    /** そのスペースが英単語同士の区切りか (前後とも英数字) */
+    const isBetweenAlpha = (ci: number): boolean => {
+      const prevCharStr = ci > 0 ? chars[ci - 1].char.slice(-1) : "";
+      const nextCharStr =
+        ci < chars.length - 1 ? chars[ci + 1].char[0] : "";
+      return isAlphaRe.test(prevCharStr) && isAlphaRe.test(nextCharStr);
+    };
     for (let ci = 0; ci < chars.length; ci++) {
       if (!isSpace(chars[ci].char)) continue;
-      const prevIsJp = ci > 0 && isJapanese(chars[ci - 1].char);
-      const nextIsJp =
-        ci < chars.length - 1 && isJapanese(chars[ci + 1].char);
-      if (!prevIsJp && !nextIsJp) {
+      if (isBetweenAlpha(ci)) {
+        // 英単語間: エンドチェックを置かない (表示も無し)
         chars[ci].hideEndMark = true;
-      }
-    }
-
-    // Post-process 3: isEndCheck（スペースの一つ前の文字・行末）
-    const isAlphaRe = /^[a-zA-Zａ-ｚＡ-Ｚ0-9０-９'',.]$/;
-    for (let ci = 0; ci < chars.length; ci++) {
-      if (isSpace(chars[ci].char) && ci > 0) {
-        const prevCharStr = chars[ci - 1].char.slice(-1);
-        const nextCharStr =
-          ci < chars.length - 1 ? chars[ci + 1].char[0] : "";
-        if (!(isAlphaRe.test(prevCharStr) && isAlphaRe.test(nextCharStr))) {
-          chars[ci - 1].isEndCheck = true;
-        }
+      } else if (ci > 0) {
+        chars[ci - 1].isEndCheck = true;
       }
     }
     if (chars.length > 0) {

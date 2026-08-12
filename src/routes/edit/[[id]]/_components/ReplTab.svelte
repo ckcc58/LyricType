@@ -901,7 +901,7 @@
   .lrcToolbar {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     padding: 6px 12px;
     background: #1a1a1a;
     border-bottom: 1px solid #333;

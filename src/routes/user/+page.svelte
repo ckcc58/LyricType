@@ -77,9 +77,10 @@
 	.tab:hover:not(.active) {
 		color: #e6e6e6;
 	}
+	/* 選択中は色を足さず「白＋下線」で示す (彩度で主張させない) */
 	.tab.active {
-		color: #4a9eff;
-		border-bottom-color: #4a9eff;
+		color: #fff;
+		border-bottom-color: #fff;
 	}
 
 	/* カードは独立した箱にせず、統一背景に溶け込ませる */

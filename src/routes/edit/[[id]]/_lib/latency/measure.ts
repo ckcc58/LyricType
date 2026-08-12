@@ -24,7 +24,26 @@ export function startLatencyTest(): void {
   player.latencyTaps = [];
   latencyBeatTimes = [];
   updateLatencyStats();
-  latencyCtx = new AudioContext();
+
+  // 多重起動ガード: 測定ボタン連打で前回のタイマーが残ると二重ビートになる
+  if (latencyInterval) {
+    clearInterval(latencyInterval);
+    latencyInterval = null;
+  }
+  // AudioContext は使い回す。毎回 new すると Chrome の上限 (約6個) に達し、
+  // 以後 new が失敗 or suspended になって音が鳴らなくなる
+  if (!latencyCtx || latencyCtx.state === "closed") {
+    try {
+      latencyCtx = new AudioContext();
+    } catch {
+      latencyCtx = null;
+    }
+  }
+  if (!latencyCtx) return; // 生成失敗時は開始しない (無音のまま計測させない)
+  // ボタンクリック起点で呼ばれるためここでの resume は許可される
+  if (latencyCtx.state === "suspended") {
+    latencyCtx.resume().catch(() => {});
+  }
   player.latencyRunning = true;
 
   latencyInterval = window.setInterval(() => {
@@ -36,11 +55,11 @@ export function startLatencyTest(): void {
     osc.connect(gain);
     gain.connect(latencyCtx!.destination);
     osc.frequency.value = 1000;
-    gain.gain.value = 0.3;
+    gain.gain.value = 0.9;
     const now = latencyCtx!.currentTime;
     osc.start(now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-    osc.stop(now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    osc.stop(now + 0.08);
 
     player.latencyBeatOn = true;
     setTimeout(() => (player.latencyBeatOn = false), 100);
@@ -78,12 +97,15 @@ export function resetLatencyOffset(): void {
   updateSetting("timeOffset", 0);
 }
 
-/** タイマーと AudioContext を解放してダイアログを閉じる */
+/** タイマーを止めてダイアログを閉じる。
+ *  AudioContext は close せず suspend で温存する (close すると再測定のたびに
+ *  new が必要になり、Chrome の生成上限に達して無音になるため使い回す)。 */
 export function closeLatencyTest(): void {
   if (latencyInterval) clearInterval(latencyInterval);
-  if (latencyCtx) latencyCtx.close();
-  latencyCtx = null;
   latencyInterval = null;
+  if (latencyCtx && latencyCtx.state === "running") {
+    latencyCtx.suspend().catch(() => {});
+  }
   player.latencyRunning = false;
   player.showLatencyTest = false;
 }

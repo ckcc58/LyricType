@@ -1,6 +1,14 @@
 import { z } from 'zod';
 
-const statusBit = z.union([z.literal(0), z.literal(1)]);
+// 一致度 (読み入力 x0.5 / 文字種違い x0.5 の積):
+//   0=text (100%) / 1=reading (50%) / 2=reading-loose (25%) / 3=text-loose (50%)
+// 0/1 のみの旧クライアントからの送信もそのまま通る
+const statusBit = z.union([
+	z.literal(0),
+	z.literal(1),
+	z.literal(2),
+	z.literal(3),
+]);
 
 // chunk: [status, len] (uncommitted) | [status, len, 1] (committed)
 const commitChunkV2 = z.union([

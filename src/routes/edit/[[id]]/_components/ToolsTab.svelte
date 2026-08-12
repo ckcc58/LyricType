@@ -14,6 +14,7 @@
   } from "../_lib/latency/measure";
   import {
     toolRemoveAllTimeTags as toolRemoveAllTimeTagsCore,
+    toolRemoveAllChecks as toolRemoveAllChecksCore,
     toolAdjustAllTimeTags as toolAdjustAllTimeTagsCore,
   } from "../_lib/timetag/tools";
 
@@ -31,6 +32,32 @@
     clearWaveformCaches,
   }: Props = $props();
 
+  /** 全タイムタグ時間調整の値を delta 秒ずらす (浮動小数の誤差が出ないよう丸める) */
+  function stepAdjust(delta: number): void {
+    const next = (Number(tt.toolTimeAdjustValue) || 0) + delta;
+    tt.toolTimeAdjustValue = Math.round(next * 100) / 100;
+    adjustText = fmtAdjust(tt.toolTimeAdjustValue);
+  }
+
+  // 表示は小数2桁固定にして桁数で幅が動かないようにする (0.15 / 0.10 / 0.05 / 0.00)。
+  // number 入力は書式を指定できないため text 入力にし、表示文字列と値を分けて持つ。
+  function fmtAdjust(n: number): string {
+    return n.toFixed(2);
+  }
+  let adjustText = $state(fmtAdjust(tt.toolTimeAdjustValue));
+
+  /** 入力中は自由に打たせ、数値として解釈できたら値へ反映する */
+  function onAdjustInput(e: Event): void {
+    adjustText = (e.currentTarget as HTMLInputElement).value;
+    const n = Number(adjustText);
+    tt.toolTimeAdjustValue = Number.isFinite(n) ? n : 0;
+  }
+
+  /** フォーカスを外したタイミングで 2 桁表記に整える */
+  function onAdjustBlur(): void {
+    adjustText = fmtAdjust(tt.toolTimeAdjustValue);
+  }
+
   function handleAdjust(): void {
     toolAdjustAllTimeTagsCore({ rebuildWaveformTagCache });
   }
@@ -40,6 +67,9 @@
       drawWaveform,
       clearWaveformCaches,
     });
+  }
+  function handleRemoveAllChecks(): void {
+    toolRemoveAllChecksCore({ rebuildWaveformTagCache });
   }
 </script>
 
@@ -66,23 +96,25 @@
       >
     </div>
     <div class="sliderRow">
+      <!-- 表示はタグに適用される補正量 (打鍵の遅れ分だけマイナスする) で統一する。
+           内部の timeOffset は「打鍵の遅れ量」を正で保持しているため符号を反転して扱う。 -->
       <input
         type="range"
         class="sliderInput"
         min="-1"
         max="1"
         step="0.01"
-        value={$settings.timeOffset}
+        value={-$settings.timeOffset}
         oninput={(e) =>
           updateSetting(
             "timeOffset",
-            parseFloat((e.currentTarget as HTMLInputElement).value),
+            -parseFloat((e.currentTarget as HTMLInputElement).value),
           )}
       />
       <span class="sliderValue"
-        >{$settings.timeOffset >= 0
-          ? "+"
-          : ""}{$settings.timeOffset.toFixed(2)}s</span
+        >{$settings.timeOffset > 0 ? "-" : $settings.timeOffset < 0 ? "+" : ""}{Math.abs(
+          $settings.timeOffset,
+        ).toFixed(2)}s</span
       >
     </div>
   </div>
@@ -96,13 +128,32 @@
       <span class="toolInlineDesc">すべてのタイムタグをシフト</span>
     </div>
     <div class="toolAction">
-      <input
-        type="number"
-        class="toolTimeInput"
-        step="0.1"
-        bind:value={tt.toolTimeAdjustValue}
-        placeholder="秒"
-      />
+      <div class="toolTimeField">
+        <!-- ブラウザ既定のスピナーは見た目が浮くので隠し、自前の ± ボタンにする -->
+        <input
+          type="text"
+          inputmode="decimal"
+          class="toolTimeInput"
+          value={adjustText}
+          oninput={onAdjustInput}
+          onblur={onAdjustBlur}
+          placeholder="0.00"
+        />
+        <div class="toolStepper">
+          <button
+            type="button"
+            class="toolStepBtn"
+            onclick={() => stepAdjust(0.05)}
+            aria-label="0.05秒増やす">▲</button
+          >
+          <button
+            type="button"
+            class="toolStepBtn"
+            onclick={() => stepAdjust(-0.05)}
+            aria-label="0.05秒減らす">▼</button
+          >
+        </div>
+      </div>
       <span class="toolTimeUnit">秒</span>
       <button
         class="toolBtn"
@@ -113,9 +164,22 @@
   </div>
   <div class="toolItem">
     <div class="toolInfo">
+      <span class="toolName">全チェック削除</span>
+      <span class="toolDesc"
+        >全ての文字のチェックを削除します</span
+      >
+    </div>
+    <button
+      class="toolBtn danger"
+      onclick={handleRemoveAllChecks}
+      disabled={!tt.lines.length}>実行</button
+    >
+  </div>
+  <div class="toolItem">
+    <div class="toolInfo">
       <span class="toolName">全タイムタグ削除</span>
       <span class="toolDesc"
-        >すべての文字からタイミング情報を削除します</span
+        >全てのタイムタグを削除します</span
       >
     </div>
     <button
@@ -156,7 +220,7 @@
   }
   .toolInlineDesc {
     margin-left: 8px;
-    color: #666;
+    color: #aaa;
     font-size: 11px;
   }
   .toolName {
@@ -165,7 +229,7 @@
     font-weight: 600;
   }
   .toolDesc {
-    color: #777;
+    color: #aaa;
     font-size: 0.65rem;
     line-height: 1.3;
   }
@@ -193,23 +257,64 @@
     min-width: 48px;
     text-align: right;
     flex-shrink: 0;
+    /* 桁が変わっても幅が動かないようにする */
+    font-variant-numeric: tabular-nums;
   }
-  .toolTimeInput {
-    width: 64px;
-    padding: 3px 6px;
+  /* 数値入力 + 自前ステッパー。既定のスピナーはサイトの見た目に合わないため隠す */
+  .toolTimeField {
+    display: flex;
+    align-items: stretch;
     background: #111;
-    color: #ddd;
     border: 1px solid #444;
     border-radius: 4px;
+    overflow: hidden;
+  }
+  .toolTimeField:focus-within {
+    border-color: #6a6d74;
+  }
+  .toolTimeInput {
+    width: 56px;
+    padding: 3px 6px;
+    background: transparent;
+    color: #ddd;
+    border: none;
     font-size: 0.75rem;
     text-align: right;
+    /* 桁数が変わっても数字の位置が動かないようにする */
+    font-variant-numeric: tabular-nums;
   }
   .toolTimeInput:focus {
     outline: none;
-    border-color: #4a9eff;
+  }
+  .toolStepper {
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid #333;
+  }
+  .toolStepBtn {
+    flex: 1;
+    width: 18px;
+    padding: 0;
+    background: transparent;
+    color: #9aa0a8;
+    border: none;
+    font-size: 7px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .toolStepBtn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+  }
+  .toolStepBtn + .toolStepBtn {
+    border-top: 1px solid #333;
   }
   .toolTimeUnit {
-    color: #777;
+    color: #aaa;
     font-size: 0.7rem;
   }
   .toolBtn {

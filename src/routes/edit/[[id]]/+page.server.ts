@@ -14,7 +14,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 
 	const { data: chart, error } = await locals.supabase
 		.from('charts')
-		.select('id, lrc_raw, repl_raw, title, artist, description, youtube_video_id, source, tags, uploader_id')
+		.select('id, lrc_raw, repl_raw, title, artist, description, youtube_video_id, source, tags, preview_time, uploader_id')
 		.eq('id', id)
 		.eq('status', 'active')
 		.single();

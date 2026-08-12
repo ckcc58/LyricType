@@ -20,8 +20,16 @@ class SubmitState {
   description = $state("");
   ytVideoId = $state("");
   source = $state("");
+  /** プレビュー開始位置 (秒)。空文字なら「最初のタイムタグ時刻を自動採用」 */
+  previewTime = $state("");
   tags: string[] = $state([]);
   tagInput = $state("");
+  /**
+   * 歌詞から自動判定した言語タグ (英語 / 英語&日本語)。未判定・該当なしは null。
+   * 「判定結果が変わったときだけ付け替える」ための前回値で、
+   * これが変わらない限りユーザーの手動での付け外しには手を出さない。
+   */
+  lastLanguageTag: string | null = $state(null);
 
   // 送信状態
   isSubmitting = $state(false);

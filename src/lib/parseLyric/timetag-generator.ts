@@ -34,9 +34,11 @@ export function generateLrcFromTimeTagData(lines: TimeTagLine[]): string {
   let result = "";
   lines.forEach(line => {
     line.chars.forEach(charData => {
-      let startTt = Number.isFinite(charData.blockTime as number)
-        ? timeToTimeTag(charData.blockTime!)
-        : Number.isFinite(charData.times[0] as number) ? timeToTimeTag(charData.times[0]!) : "";
+      // times[0] (チェックに打たれたタグ) を優先し、blockTime は checkCount=0 時代の
+      // 保持タグとして控えに使う。逆にすると打ち直し後も古い blockTime が出力され続ける。
+      let startTt = Number.isFinite(charData.times[0] as number)
+        ? timeToTimeTag(charData.times[0]!)
+        : Number.isFinite(charData.blockTime as number) ? timeToTimeTag(charData.blockTime!) : "";
       let endTt = Number.isFinite(charData.endTime as number) ? timeToTimeTag(charData.endTime!) : "";
       result += startTt + charData.char + endTt;
     })
